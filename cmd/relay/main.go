@@ -24,6 +24,7 @@ import (
 	_ "github.com/Seeyko/relay/internal/providers/tiktok"
 	_ "github.com/Seeyko/relay/internal/providers/website"
 	_ "github.com/Seeyko/relay/internal/providers/x"
+	_ "github.com/Seeyko/relay/internal/providers/youtube"
 )
 
 var version = "dev"

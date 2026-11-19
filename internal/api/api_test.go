@@ -20,8 +20,10 @@ import (
 	"github.com/Seeyko/relay/internal/store"
 
 	_ "github.com/Seeyko/relay/internal/providers/meta"
+	_ "github.com/Seeyko/relay/internal/providers/tiktok"
 	_ "github.com/Seeyko/relay/internal/providers/website"
 	_ "github.com/Seeyko/relay/internal/providers/x"
+	_ "github.com/Seeyko/relay/internal/providers/youtube"
 )
 
 const token = "test-token-0123456789"
@@ -378,29 +380,29 @@ func TestMetaProviders(t *testing.T) {
 		p := r.URL.Path
 		switch {
 		// Facebook
-		case p == "/v23.0/123" && r.Method == "GET":
+		case p == "/v26.0/123" && r.Method == "GET":
 			w.Write([]byte(`{"id":"123","name":"Alice Page","username":"alicepage"}`))
-		case p == "/v23.0/123/feed":
+		case p == "/v26.0/123/feed":
 			if r.FormValue("message") != "hello fb" {
 				t.Errorf("fb message: %q", r.FormValue("message"))
 			}
 			w.Write([]byte(`{"id":"123_9"}`))
-		case p == "/v23.0/123_9" && r.URL.Query().Get("fields") == "permalink_url":
+		case p == "/v26.0/123_9" && r.URL.Query().Get("fields") == "permalink_url":
 			w.Write([]byte(`{"permalink_url":"https://facebook.com/p/9"}`))
-		case p == "/v23.0/123_9/comments" && r.Method == "GET":
+		case p == "/v26.0/123_9/comments" && r.Method == "GET":
 			w.Write([]byte(`{"data":[{"id":"c1","message":"nice","created_time":"2026-11-19T10:00:00+0000","from":{"id":"5","name":"Ann"}},{"id":"c2","message":"mine","from":{"id":"123","name":"Alice Page"}}]}`))
 		// Instagram
-		case p == "/v23.0/me":
+		case p == "/v26.0/me":
 			w.Write([]byte(`{"id":"app1","user_id":"ig1","username":"alice.ig"}`))
-		case p == "/v23.0/ig1/media" && r.Method == "POST":
+		case p == "/v26.0/ig1/media" && r.Method == "POST":
 			igSteps = append(igSteps, "container:"+r.FormValue("image_url"))
 			w.Write([]byte(`{"id":"cont1"}`))
-		case p == "/v23.0/cont1":
+		case p == "/v26.0/cont1":
 			w.Write([]byte(`{"status_code":"FINISHED"}`))
-		case p == "/v23.0/ig1/media_publish":
+		case p == "/v26.0/ig1/media_publish":
 			igSteps = append(igSteps, "publish:"+r.FormValue("creation_id"))
 			w.Write([]byte(`{"id":"igm1"}`))
-		case p == "/v23.0/igm1" && r.URL.Query().Get("fields") == "permalink":
+		case p == "/v26.0/igm1" && r.URL.Query().Get("fields") == "permalink":
 			w.Write([]byte(`{"permalink":"https://instagram.com/p/x"}`))
 		default:
 			t.Errorf("unexpected %s %s", r.Method, p)

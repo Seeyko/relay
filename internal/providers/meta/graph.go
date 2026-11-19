@@ -5,20 +5,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/Seeyko/relay/internal/providers"
 )
 
-const DefaultVersion = "v23.0"
+const DefaultVersion = "v26.0"
 
 // graph is a tiny Graph API client authenticated with one access token.
 type graph struct {
-	Base  string // e.g. https://graph.facebook.com/v23.0
+	Base  string // e.g. https://graph.facebook.com/v26.0
 	Token string
 	HC    *http.Client
 }
@@ -40,11 +42,19 @@ func (g *graph) get(ctx context.Context, path string, q url.Values, out any) err
 }
 
 func (g *graph) post(ctx context.Context, path string, form url.Values, out any) error {
+	return g.postForm(ctx, "", path, form, out)
+}
+
+// postForm is post against another host (base "" means g.Base), e.g. a video upload host.
+func (g *graph) postForm(ctx context.Context, base, path string, form url.Values, out any) error {
 	if form == nil {
 		form = url.Values{}
 	}
 	form.Set("access_token", g.Token)
-	req, err := http.NewRequestWithContext(ctx, "POST", g.Base+path, strings.NewReader(form.Encode()))
+	if base == "" {
+		base = g.Base
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", base+path, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -58,17 +68,22 @@ func (g *graph) postFile(ctx context.Context, base, path string, fields map[stri
 		return err
 	}
 	defer f.Close()
+	return g.postMultipart(ctx, base, path, fields, field, m.Filename, f, out)
+}
+
+// postMultipart sends fields plus one file part read from r (multipart/form-data).
+func (g *graph) postMultipart(ctx context.Context, base, path string, fields map[string]string, field, filename string, r io.Reader, out any) error {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	fields["access_token"] = g.Token
+	_ = w.WriteField("access_token", g.Token)
 	for k, v := range fields {
 		_ = w.WriteField(k, v)
 	}
-	fw, err := w.CreateFormFile(field, m.Filename)
+	fw, err := w.CreateFormFile(field, filename)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(fw, f); err != nil {
+	if _, err := io.Copy(fw, r); err != nil {
 		return err
 	}
 	w.Close()
@@ -90,12 +105,65 @@ func (g *graph) send(req *http.Request, out any) error {
 	}
 	b, err := providers.ReadBody(resp)
 	if err != nil {
+		var he *providers.HTTPError
+		if errors.As(err, &he) {
+			return classify(he)
+		}
 		return err
 	}
 	if out != nil {
 		return json.Unmarshal(b, out)
 	}
 	return nil
+}
+
+// graphErrBody is the documented Graph API error envelope.
+// https://developers.facebook.com/docs/graph-api/guides/error-handling
+type graphErrBody struct {
+	Error struct {
+		Message     string `json:"message"`
+		Type        string `json:"type"`
+		Code        int    `json:"code"`
+		Subcode     int    `json:"error_subcode"`
+		IsTransient bool   `json:"is_transient"`
+	} `json:"error"`
+}
+
+// classify maps Graph error codes onto the HTTP status that providers.Retryable understands.
+// Graph answers most errors with HTTP 400, including rate limits, so the status alone is not enough:
+// throttling codes become 429, transient ones 503, and auth/permission/content errors are never retried.
+func classify(he *providers.HTTPError) error {
+	var ge graphErrBody
+	if json.Unmarshal([]byte(he.Body), &ge) != nil || ge.Error.Code == 0 {
+		return he
+	}
+	switch c := ge.Error.Code; {
+	case c == 4 || c == 17 || c == 32 || c == 341 || c == 613 || c == 80001:
+		he.Status = http.StatusTooManyRequests
+	case c == 190 || c == 102 || c == 10 || c == 100 || c == 506 || c == 368 || (c >= 200 && c <= 299):
+		if he.Status >= 500 || he.Status == http.StatusTooManyRequests {
+			he.Status = http.StatusBadRequest
+		}
+	case c == 1 || c == 2 || ge.Error.IsTransient:
+		if he.Status < 500 {
+			he.Status = http.StatusServiceUnavailable
+		}
+	}
+	return he
+}
+
+// flexInt decodes a JSON number or a numeric string (Graph returns upload offsets as strings).
+type flexInt int64
+
+func (n *flexInt) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if s == "" || s == "null" {
+		*n = 0
+		return nil
+	}
+	v, err := strconv.ParseInt(s, 10, 64)
+	*n = flexInt(v)
+	return err
 }
 
 type idResp struct {
