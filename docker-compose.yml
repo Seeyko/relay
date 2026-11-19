@@ -1,0 +1,17 @@
+# Works as-is with Docker Compose, Dokploy, Coolify, Portainer...
+services:
+  relay:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - relay-data:/data
+    ports:
+      - "8080"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+volumes:
+  relay-data:

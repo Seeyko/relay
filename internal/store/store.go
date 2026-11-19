@@ -1,0 +1,674 @@
+// Package store persists accounts, posts, media, comments and agent tasks in SQLite.
+package store
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+var ErrNotFound = errors.New("not found")
+
+type Store struct {
+	db *sql.DB
+}
+
+func Open(path string) (*Store, error) {
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)", path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1) // SQLite: one writer, keeps things simple and safe
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func NewID(prefix string) string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return prefix + "_" + hex.EncodeToString(b)
+}
+
+const schema = `
+CREATE TABLE IF NOT EXISTS accounts (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  name TEXT NOT NULL,
+  handle TEXT NOT NULL DEFAULT '',
+  remote_user_id TEXT NOT NULL DEFAULT '',
+  credentials BLOB,
+  created_at TIMESTAMP NOT NULL
+);
+CREATE TABLE IF NOT EXISTS posts (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  parts TEXT NOT NULL,
+  media TEXT NOT NULL DEFAULT '[]',
+  options TEXT NOT NULL DEFAULT '{}',
+  scheduled_at TIMESTAMP,
+  published_at TIMESTAMP,
+  remote_id TEXT NOT NULL DEFAULT '',
+  remote_ids TEXT NOT NULL DEFAULT '[]',
+  remote_url TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMP,
+  metrics TEXT NOT NULL DEFAULT '{}',
+  metrics_at TIMESTAMP,
+  source TEXT NOT NULL DEFAULT 'relay',
+  created_at TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP NOT NULL
+);
+CREATE INDEX IF NOT EXISTS posts_due ON posts(status, scheduled_at);
+CREATE UNIQUE INDEX IF NOT EXISTS posts_remote ON posts(account_id, remote_id) WHERE remote_id != '';
+CREATE TABLE IF NOT EXISTS media (
+  id TEXT PRIMARY KEY,
+  filename TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL
+);
+CREATE TABLE IF NOT EXISTS comments (
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  remote_id TEXT NOT NULL,
+  post_id TEXT NOT NULL DEFAULT '',
+  author TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP,
+  seen_at TIMESTAMP NOT NULL,
+  replied INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, remote_id)
+);
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  result TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL,
+  claimed_at TIMESTAMP,
+  done_at TIMESTAMP
+);
+`
+
+func (s *Store) migrate() error {
+	_, err := s.db.Exec(schema)
+	return err
+}
+
+// ---------- Accounts ----------
+
+type Account struct {
+	ID           string    `json:"id"`
+	Provider     string    `json:"provider"`
+	Name         string    `json:"name"`
+	Handle       string    `json:"handle"`
+	RemoteUserID string    `json:"remote_user_id"`
+	Credentials  []byte    `json:"-"` // encrypted blob
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
+	if a.ID == "" {
+		a.ID = NewID("acc")
+	}
+	a.CreatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts(id,provider,name,handle,remote_user_id,credentials,created_at) VALUES(?,?,?,?,?,?,?)`,
+		a.ID, a.Provider, a.Name, a.Handle, a.RemoteUserID, a.Credentials, a.CreatedAt)
+	return err
+}
+
+func (s *Store) UpdateAccount(ctx context.Context, a *Account) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET name=?, handle=?, remote_user_id=?, credentials=? WHERE id=?`,
+		a.Name, a.Handle, a.RemoteUserID, a.Credentials, a.ID)
+	return err
+}
+
+func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id,provider,name,handle,remote_user_id,credentials,created_at FROM accounts WHERE id=?`, id)
+	a := &Account{}
+	if err := row.Scan(&a.ID, &a.Provider, &a.Name, &a.Handle, &a.RemoteUserID, &a.Credentials, &a.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return a, nil
+}
+
+func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,provider,name,handle,remote_user_id,credentials,created_at FROM accounts ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Account
+	for rows.Next() {
+		a := &Account{}
+		if err := rows.Scan(&a.ID, &a.Provider, &a.Name, &a.Handle, &a.RemoteUserID, &a.Credentials, &a.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteAccount(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ---------- Posts ----------
+
+const (
+	StatusDraft      = "draft"
+	StatusScheduled  = "scheduled"
+	StatusPublishing = "publishing"
+	StatusPublished  = "published"
+	StatusFailed     = "failed"
+)
+
+type Post struct {
+	ID            string           `json:"id"`
+	GroupID       string           `json:"group_id"`
+	AccountID     string           `json:"account_id"`
+	Status        string           `json:"status"`
+	Parts         []string         `json:"parts"`   // one element = single post, several = thread
+	Media         []string         `json:"media"`   // media ids attached to the first part
+	Options       map[string]any   `json:"options"` // provider-specific (title, privacy, ...)
+	ScheduledAt   *time.Time       `json:"scheduled_at,omitempty"`
+	PublishedAt   *time.Time       `json:"published_at,omitempty"`
+	RemoteID      string           `json:"remote_id,omitempty"`
+	RemoteIDs     []string         `json:"remote_ids,omitempty"`
+	RemoteURL     string           `json:"remote_url,omitempty"`
+	Error         string           `json:"error,omitempty"`
+	Attempts      int              `json:"attempts"`
+	NextAttemptAt *time.Time       `json:"next_attempt_at,omitempty"`
+	Metrics       map[string]int64 `json:"metrics"`
+	MetricsAt     *time.Time       `json:"metrics_at,omitempty"`
+	Source        string           `json:"source"`
+	CreatedAt     time.Time        `json:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+}
+
+const postCols = `id,group_id,account_id,status,parts,media,options,scheduled_at,published_at,remote_id,remote_ids,remote_url,error,attempts,next_attempt_at,metrics,metrics_at,source,created_at,updated_at`
+
+type scanner interface{ Scan(...any) error }
+
+func scanPost(r scanner) (*Post, error) {
+	p := &Post{}
+	var parts, media, opts, rids, metrics string
+	var sched, pub, next, mAt sql.NullTime
+	if err := r.Scan(&p.ID, &p.GroupID, &p.AccountID, &p.Status, &parts, &media, &opts, &sched, &pub, &p.RemoteID, &rids, &p.RemoteURL, &p.Error, &p.Attempts, &next, &metrics, &mAt, &p.Source, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(parts), &p.Parts)
+	_ = json.Unmarshal([]byte(media), &p.Media)
+	_ = json.Unmarshal([]byte(opts), &p.Options)
+	_ = json.Unmarshal([]byte(rids), &p.RemoteIDs)
+	_ = json.Unmarshal([]byte(metrics), &p.Metrics)
+	p.ScheduledAt = nt(sched)
+	p.PublishedAt = nt(pub)
+	p.NextAttemptAt = nt(next)
+	p.MetricsAt = nt(mAt)
+	if p.Media == nil {
+		p.Media = []string{}
+	}
+	if p.Options == nil {
+		p.Options = map[string]any{}
+	}
+	if p.Metrics == nil {
+		p.Metrics = map[string]int64{}
+	}
+	return p, nil
+}
+
+func nt(t sql.NullTime) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	v := t.Time.UTC()
+	return &v
+}
+
+func js(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func (s *Store) CreatePost(ctx context.Context, p *Post) error {
+	now := time.Now().UTC()
+	if p.ID == "" {
+		p.ID = NewID("post")
+	}
+	if p.GroupID == "" {
+		p.GroupID = p.ID
+	}
+	if p.Source == "" {
+		p.Source = "relay"
+	}
+	if p.Media == nil {
+		p.Media = []string{}
+	}
+	if p.Options == nil {
+		p.Options = map[string]any{}
+	}
+	if p.Metrics == nil {
+		p.Metrics = map[string]int64{}
+	}
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = now
+	}
+	p.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `INSERT INTO posts(`+postCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.GroupID, p.AccountID, p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt,
+		p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.Source, p.CreatedAt, p.UpdatedAt)
+	return err
+}
+
+// UpsertImported stores a post fetched from a network's history; existing rows only get metrics refreshed.
+func (s *Store) UpsertImported(ctx context.Context, p *Post) (created bool, err error) {
+	var id string
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM posts WHERE account_id=? AND remote_id=?`, p.AccountID, p.RemoteID).Scan(&id)
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `UPDATE posts SET metrics=?, metrics_at=?, updated_at=? WHERE id=?`, js(p.Metrics), time.Now().UTC(), time.Now().UTC(), id)
+		return false, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	p.Source = "imported"
+	p.Status = StatusPublished
+	now := time.Now().UTC()
+	p.MetricsAt = &now
+	return true, s.CreatePost(ctx, p)
+}
+
+func (s *Store) UpdatePost(ctx context.Context, p *Post) error {
+	p.UpdatedAt = time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?,parts=?,media=?,options=?,scheduled_at=?,published_at=?,remote_id=?,remote_ids=?,remote_url=?,error=?,attempts=?,next_attempt_at=?,metrics=?,metrics_at=?,updated_at=? WHERE id=?`,
+		p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt, p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.UpdatedAt, p.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) GetPost(ctx context.Context, id string) (*Post, error) {
+	p, err := scanPost(s.db.QueryRowContext(ctx, `SELECT `+postCols+` FROM posts WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return p, err
+}
+
+func (s *Store) DeletePost(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM posts WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+type PostFilter struct {
+	Status    string
+	AccountID string
+	GroupID   string
+	Source    string
+	From, To  *time.Time // on scheduled_at or published_at
+	Limit     int
+	Offset    int
+}
+
+func (s *Store) ListPosts(ctx context.Context, f PostFilter) ([]*Post, error) {
+	var where []string
+	var args []any
+	if f.Status != "" {
+		where = append(where, "status=?")
+		args = append(args, f.Status)
+	}
+	if f.AccountID != "" {
+		where = append(where, "account_id=?")
+		args = append(args, f.AccountID)
+	}
+	if f.GroupID != "" {
+		where = append(where, "group_id=?")
+		args = append(args, f.GroupID)
+	}
+	if f.Source != "" {
+		where = append(where, "source=?")
+		args = append(args, f.Source)
+	}
+	if f.From != nil {
+		where = append(where, "COALESCE(published_at, scheduled_at, created_at) >= ?")
+		args = append(args, f.From.UTC())
+	}
+	if f.To != nil {
+		where = append(where, "COALESCE(published_at, scheduled_at, created_at) < ?")
+		args = append(args, f.To.UTC())
+	}
+	q := `SELECT ` + postCols + ` FROM posts`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY COALESCE(published_at, scheduled_at, created_at) DESC"
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 100
+	}
+	q += fmt.Sprintf(" LIMIT %d OFFSET %d", f.Limit, f.Offset)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Post{}
+	for rows.Next() {
+		p, err := scanPost(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ClaimDue atomically moves due scheduled posts to "publishing" and returns them.
+func (s *Store) ClaimDue(ctx context.Context, now time.Time, max int) ([]*Post, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM posts WHERE status=? AND scheduled_at <= ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?) ORDER BY scheduled_at LIMIT ?`,
+		StatusScheduled, now.UTC(), now.UTC(), max)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	var out []*Post
+	for _, id := range ids {
+		res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?, updated_at=? WHERE id=? AND status=?`, StatusPublishing, now.UTC(), id, StatusScheduled)
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := res.RowsAffected(); n == 1 {
+			p, err := s.GetPost(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// RecoverStuck puts posts left in "publishing" (crash mid-publish) back to scheduled.
+func (s *Store) RecoverStuck(ctx context.Context, olderThan time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=? WHERE status=? AND updated_at < ?`, StatusScheduled, StatusPublishing, olderThan.UTC())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ---------- Media ----------
+
+type Media struct {
+	ID        string    `json:"id"`
+	Filename  string    `json:"filename"`
+	Mime      string    `json:"mime"`
+	Size      int64     `json:"size"`
+	Path      string    `json:"-"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func (s *Store) CreateMedia(ctx context.Context, m *Media) error {
+	if m.ID == "" {
+		m.ID = NewID("med")
+	}
+	m.CreatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO media(id,filename,mime,size,path,created_at) VALUES(?,?,?,?,?,?)`, m.ID, m.Filename, m.Mime, m.Size, m.Path, m.CreatedAt)
+	return err
+}
+
+func (s *Store) GetMedia(ctx context.Context, id string) (*Media, error) {
+	m := &Media{}
+	err := s.db.QueryRowContext(ctx, `SELECT id,filename,mime,size,path,created_at FROM media WHERE id=?`, id).Scan(&m.ID, &m.Filename, &m.Mime, &m.Size, &m.Path, &m.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+func (s *Store) ListMedia(ctx context.Context) ([]*Media, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,filename,mime,size,path,created_at FROM media ORDER BY created_at DESC LIMIT 500`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Media{}
+	for rows.Next() {
+		m := &Media{}
+		if err := rows.Scan(&m.ID, &m.Filename, &m.Mime, &m.Size, &m.Path, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ---------- Comments ----------
+
+type Comment struct {
+	AccountID string     `json:"account_id"`
+	RemoteID  string     `json:"remote_id"`
+	PostID    string     `json:"post_id"`
+	Author    string     `json:"author"`
+	Text      string     `json:"text"`
+	URL       string     `json:"url,omitempty"`
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+	SeenAt    time.Time  `json:"seen_at"`
+	Replied   bool       `json:"replied"`
+}
+
+// UpsertComment returns true when the comment was not known before.
+func (s *Store) UpsertComment(ctx context.Context, c *Comment) (bool, error) {
+	c.SeenAt = time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `INSERT INTO comments(account_id,remote_id,post_id,author,text,url,created_at,seen_at) VALUES(?,?,?,?,?,?,?,?)
+	  ON CONFLICT(account_id,remote_id) DO NOTHING`, c.AccountID, c.RemoteID, c.PostID, c.Author, c.Text, c.URL, c.CreatedAt, c.SeenAt)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+func (s *Store) MarkReplied(ctx context.Context, accountID, remoteID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE comments SET replied=1 WHERE account_id=? AND remote_id=?`, accountID, remoteID)
+	return err
+}
+
+type CommentFilter struct {
+	AccountID   string
+	PostID      string
+	OnlyPending bool
+	Limit       int
+}
+
+func (s *Store) ListComments(ctx context.Context, f CommentFilter) ([]*Comment, error) {
+	var where []string
+	var args []any
+	if f.AccountID != "" {
+		where = append(where, "account_id=?")
+		args = append(args, f.AccountID)
+	}
+	if f.PostID != "" {
+		where = append(where, "post_id=?")
+		args = append(args, f.PostID)
+	}
+	if f.OnlyPending {
+		where = append(where, "replied=0")
+	}
+	q := `SELECT account_id,remote_id,post_id,author,text,url,created_at,seen_at,replied FROM comments`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	if f.Limit <= 0 || f.Limit > 1000 {
+		f.Limit = 200
+	}
+	q += fmt.Sprintf(" ORDER BY COALESCE(created_at, seen_at) DESC LIMIT %d", f.Limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Comment{}
+	for rows.Next() {
+		c := &Comment{}
+		var ca sql.NullTime
+		if err := rows.Scan(&c.AccountID, &c.RemoteID, &c.PostID, &c.Author, &c.Text, &c.URL, &ca, &c.SeenAt, &c.Replied); err != nil {
+			return nil, err
+		}
+		c.CreatedAt = nt(ca)
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// ---------- Agent tasks (browser agent queue) ----------
+
+type AgentTask struct {
+	ID        string         `json:"id"`
+	AccountID string         `json:"account_id"`
+	Kind      string         `json:"kind"`
+	Payload   map[string]any `json:"payload"`
+	Status    string         `json:"status"` // pending, claimed, done, failed
+	Result    string         `json:"result,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	ClaimedAt *time.Time     `json:"claimed_at,omitempty"`
+	DoneAt    *time.Time     `json:"done_at,omitempty"`
+}
+
+func (s *Store) CreateTask(ctx context.Context, t *AgentTask) error {
+	if t.ID == "" {
+		t.ID = NewID("task")
+	}
+	t.Status = "pending"
+	t.CreatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO agent_tasks(id,account_id,kind,payload,status,created_at) VALUES(?,?,?,?,?,?)`, t.ID, t.AccountID, t.Kind, js(t.Payload), t.Status, t.CreatedAt)
+	return err
+}
+
+func scanTask(r scanner) (*AgentTask, error) {
+	t := &AgentTask{}
+	var payload string
+	var ca, da sql.NullTime
+	if err := r.Scan(&t.ID, &t.AccountID, &t.Kind, &payload, &t.Status, &t.Result, &t.CreatedAt, &ca, &da); err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(payload), &t.Payload)
+	t.ClaimedAt, t.DoneAt = nt(ca), nt(da)
+	return t, nil
+}
+
+const taskCols = `id,account_id,kind,payload,status,result,created_at,claimed_at,done_at`
+
+// ClaimTask hands the oldest pending task (or one claimed more than 10 minutes ago) to the agent.
+func (s *Store) ClaimTask(ctx context.Context) (*AgentTask, error) {
+	now := time.Now().UTC()
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM agent_tasks WHERE status='pending' OR (status='claimed' AND claimed_at < ?) ORDER BY created_at LIMIT 1`, now.Add(-10*time.Minute)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET status='claimed', claimed_at=? WHERE id=?`, now, id); err != nil {
+		return nil, err
+	}
+	return s.GetTask(ctx, id)
+}
+
+func (s *Store) GetTask(ctx context.Context, id string) (*AgentTask, error) {
+	t, err := scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskCols+` FROM agent_tasks WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return t, err
+}
+
+func (s *Store) CompleteTask(ctx context.Context, id string, ok bool, result string) error {
+	status := "done"
+	if !ok {
+		status = "failed"
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET status=?, result=?, done_at=? WHERE id=?`, status, result, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListTasks(ctx context.Context, status string) ([]*AgentTask, error) {
+	q := `SELECT ` + taskCols + ` FROM agent_tasks`
+	var args []any
+	if status != "" {
+		q += ` WHERE status=?`
+		args = append(args, status)
+	}
+	q += ` ORDER BY created_at DESC LIMIT 200`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*AgentTask{}
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}

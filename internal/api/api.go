@@ -1,0 +1,244 @@
+// Package api is Relay's REST API. Every route maps onto the same tools the MCP server exposes.
+package api
+
+import (
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/Seeyko/relay/internal/core"
+	"github.com/Seeyko/relay/internal/mcp"
+	"github.com/Seeyko/relay/internal/store"
+)
+
+type API struct {
+	Svc     *core.Service
+	MCP     *mcp.Server
+	Token   string
+	Log     *slog.Logger
+	Version string
+}
+
+func (a *API) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]string{"status": "ok", "version": a.Version})
+	})
+	// Public media (random ids): networks like Instagram download from here.
+	mux.HandleFunc("GET /media/{file}", func(w http.ResponseWriter, r *http.Request) {
+		name := filepath.Base(r.PathValue("file"))
+		if !strings.HasPrefix(name, "med_") {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(a.Svc.MediaDir, name))
+	})
+
+	authed := http.NewServeMux()
+	authed.Handle("POST /mcp", a.MCP)
+	authed.Handle("GET /mcp", a.MCP)
+
+	authed.HandleFunc("GET /v1/tools", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, a.MCP.Tools()) })
+	authed.HandleFunc("POST /v1/tools/{name}", func(w http.ResponseWriter, r *http.Request) {
+		a.call(w, r, r.PathValue("name"), body(r))
+	})
+
+	authed.HandleFunc("GET /v1/providers", a.tool("list_providers", nil))
+	authed.HandleFunc("GET /v1/accounts", a.tool("list_accounts", nil))
+	authed.HandleFunc("POST /v1/accounts", a.tool("connect_account", nil))
+	authed.HandleFunc("DELETE /v1/accounts/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if err := a.Svc.Store.DeleteAccount(r.Context(), r.PathValue("id")); err != nil {
+			a.fail(w, err)
+			return
+		}
+		w.WriteHeader(204)
+	})
+	authed.HandleFunc("POST /v1/accounts/{id}/import", a.tool("import_history", map[string]string{"id": "account_id"}))
+
+	authed.HandleFunc("GET /v1/posts", a.tool("list_posts", nil))
+	authed.HandleFunc("POST /v1/posts", a.tool("schedule_post", nil))
+	authed.HandleFunc("GET /v1/posts/{id}", a.tool("get_post", map[string]string{"id": "id"}))
+	authed.HandleFunc("PATCH /v1/posts/{id}", a.tool("update_post", map[string]string{"id": "id"}))
+	authed.HandleFunc("DELETE /v1/posts/{id}", a.tool("delete_post", map[string]string{"id": "id"}))
+	authed.HandleFunc("POST /v1/posts/{id}/publish", a.tool("publish_now", map[string]string{"id": "id"}))
+	authed.HandleFunc("GET /v1/posts/{id}/comments", a.tool("list_comments", map[string]string{"id": "post_id"}))
+
+	authed.HandleFunc("GET /v1/comments", a.tool("list_comments", nil))
+	authed.HandleFunc("POST /v1/comments/reply", a.tool("reply_comment", nil))
+	authed.HandleFunc("POST /v1/metrics/refresh", a.tool("refresh_metrics", nil))
+	authed.HandleFunc("GET /v1/stats", a.tool("get_stats", nil))
+
+	authed.HandleFunc("GET /v1/media", func(w http.ResponseWriter, r *http.Request) {
+		ms, err := a.Svc.Store.ListMedia(r.Context())
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, 200, ms)
+	})
+	authed.HandleFunc("POST /v1/media", a.uploadMedia)
+
+	// Browser agent (runs on the owner's computer, pulls work).
+	authed.HandleFunc("GET /v1/agent/tasks", a.tool("list_browser_tasks", nil))
+	authed.HandleFunc("POST /v1/agent/tasks", a.tool("create_browser_task", nil))
+	authed.HandleFunc("POST /v1/agent/tasks/claim", func(w http.ResponseWriter, r *http.Request) {
+		t, err := a.Svc.Store.ClaimTask(r.Context())
+		if errors.Is(err, store.ErrNotFound) {
+			w.WriteHeader(204)
+			return
+		}
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, 200, t)
+	})
+	authed.HandleFunc("POST /v1/agent/tasks/{id}/result", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			OK     bool            `json:"ok"`
+			Result json.RawMessage `json:"result"`
+		}
+		if err := json.Unmarshal(body(r), &in); err != nil {
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := a.Svc.Store.CompleteTask(r.Context(), r.PathValue("id"), in.OK, string(in.Result)); err != nil {
+			a.fail(w, err)
+			return
+		}
+		w.WriteHeader(204)
+	})
+
+	mux.Handle("/", a.auth(authed))
+	return a.logging(mux)
+}
+
+func (a *API) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if a.Token == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(a.Token)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="relay"`)
+			writeJSON(w, 401, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusWriter) WriteHeader(c int) { s.status = c; s.ResponseWriter.WriteHeader(c) }
+
+func (a *API) logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sw, r)
+		if r.URL.Path != "/healthz" {
+			a.Log.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status)
+		}
+	})
+}
+
+func body(r *http.Request) []byte {
+	b, _ := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	return b
+}
+
+// tool builds a handler whose arguments are the JSON body, merged with query params and path values.
+func (a *API) tool(name string, pathArgs map[string]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		args := map[string]any{}
+		if b := body(r); len(b) > 0 {
+			if err := json.Unmarshal(b, &args); err != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid JSON body: " + err.Error()})
+				return
+			}
+		}
+		for k, vs := range r.URL.Query() {
+			v := vs[0]
+			if n, err := strconv.Atoi(v); err == nil && (k == "limit" || k == "offset" || k == "top" || k == "max") {
+				args[k] = n
+			} else if v == "true" || v == "false" {
+				args[k] = v == "true"
+			} else {
+				args[k] = v
+			}
+		}
+		for p, arg := range pathArgs {
+			args[arg] = r.PathValue(p)
+		}
+		raw, _ := json.Marshal(args)
+		a.call(w, r, name, raw)
+	}
+}
+
+func (a *API) call(w http.ResponseWriter, r *http.Request, name string, args []byte) {
+	res, err := a.MCP.Call(r.Context(), name, args)
+	if err != nil {
+		if res != nil {
+			writeJSON(w, 502, map[string]any{"error": err.Error(), "partial": res})
+			return
+		}
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, 200, res)
+}
+
+func (a *API) fail(w http.ResponseWriter, err error) {
+	var inv *core.ErrInvalid
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeJSON(w, 404, map[string]string{"error": "not found"})
+	case errors.Is(err, mcp.ErrUnknownTool):
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+	case errors.As(err, &inv):
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+	default:
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+	}
+}
+
+func (a *API) uploadMedia(w http.ResponseWriter, r *http.Request) {
+	ct := r.Header.Get("Content-Type")
+	var m *store.Media
+	var err error
+	if strings.HasPrefix(ct, "multipart/") {
+		f, hdr, ferr := r.FormFile("file")
+		if ferr != nil {
+			writeJSON(w, 400, map[string]string{"error": "multipart field 'file' is required"})
+			return
+		}
+		defer f.Close()
+		m, err = a.Svc.SaveMedia(r.Context(), f, hdr.Filename, hdr.Header.Get("Content-Type"))
+	} else {
+		var in struct {
+			URL string `json:"url"`
+		}
+		if jerr := json.Unmarshal(body(r), &in); jerr != nil || in.URL == "" {
+			writeJSON(w, 400, map[string]string{"error": "send multipart 'file' or JSON {\"url\": ...}"})
+			return
+		}
+		m, err = a.Svc.SaveMediaFromURL(r.Context(), in.URL)
+	}
+	if err != nil {
+		a.fail(w, err)
+		return
+	}
+	writeJSON(w, 201, map[string]any{"media": m, "url": a.Svc.MediaURL(m)})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
