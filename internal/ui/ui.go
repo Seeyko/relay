@@ -49,7 +49,7 @@ const (
 type UI struct {
 	Store    *store.Store
 	APIToken string // required to register a passkey
-	// RegistrationClosed refuses new passkeys (RELAY_UI_REGISTRATION=off), even with the API token.
+	// RegistrationClosed refuses new passkeys (RELAY_PASSKEY_REGISTRATION=off), even with the API token.
 	RegistrationClosed bool
 	Log                *slog.Logger
 
@@ -327,7 +327,7 @@ func (ui *UI) tokenOK(r *http.Request) bool {
 
 func (ui *UI) registerBegin(w http.ResponseWriter, r *http.Request) {
 	if ui.RegistrationClosed {
-		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_UI_REGISTRATION=off)")
+		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_PASSKEY_REGISTRATION=off)")
 		return
 	}
 	if !ui.tokenOK(r) {
@@ -372,7 +372,7 @@ func (ui *UI) registerBegin(w http.ResponseWriter, r *http.Request) {
 
 func (ui *UI) registerFinish(w http.ResponseWriter, r *http.Request) {
 	if ui.RegistrationClosed {
-		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_UI_REGISTRATION=off)")
+		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_PASSKEY_REGISTRATION=off)")
 		return
 	}
 	if !ui.tokenOK(r) {

@@ -66,7 +66,7 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_S3_REGION` | `auto` | Bucket region (`auto` for R2) |
 | `RELAY_S3_PUBLIC_URL` | | Public base URL of the bucket (custom domain or r2.dev). Empty: the bucket stays private and Relay serves media at `/media/` |
 | `RELAY_UI` | `on` | `off` disables the read-only dashboard at `/ui/` |
-| `RELAY_UI_REGISTRATION` | `on` | `off` refuses new passkeys, even with the API token (existing ones keep working) |
+| `RELAY_PASSKEY_REGISTRATION` | `on` | `off` refuses new passkeys, even with the API token (existing ones keep working) |
 | `RELAY_DRAFT_TOKEN` | | Optional second key that can only create and edit drafts |
 | `RELAY_WEBHOOK_URL` / `RELAY_WEBHOOK_SECRET` | | Webhook target and HMAC secret |
 | `RELAY_AGENT_INSTRUCTIONS` | | Extra instructions sent to MCP clients (timezone, tone, languages...) |
@@ -90,7 +90,7 @@ A minimal, read-only calendar at `https://<your-host>/ui/`: week and day views o
 preview of the text, media, status and errors. It cannot publish or edit anything.
 
 Login is passkey-only (WebAuthn, with user verification: Touch ID, Windows Hello, a security key...). To add a
-passkey, open the page, expand "Add a passkey" and enter `RELAY_API_TOKEN` once. Once your keys are added, set `RELAY_UI_REGISTRATION=off` to close registration. Sessions last 12 hours and use a
+passkey, open the page, expand "Add a passkey" and enter `RELAY_API_TOKEN` once. Once your keys are added, set `RELAY_PASSKEY_REGISTRATION=off` to close registration. Sessions last 12 hours and use a
 `__Host-` cookie (Secure, HttpOnly, SameSite=Strict). The dashboard needs `RELAY_BASE_URL` on https; set
 `RELAY_UI=off` to disable it.
 
