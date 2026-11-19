@@ -130,6 +130,7 @@ type harness struct {
 	st     *store.Store
 	client *http.Client
 	origin string
+	ui     *UI
 }
 
 func newHarness(t *testing.T) *harness {
@@ -152,7 +153,7 @@ func newHarness(t *testing.T) *harness {
 	srv.Start()
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
-	return &harness{t: t, srv: srv, st: st, client: &http.Client{Jar: jar}, origin: base}
+	return &harness{t: t, srv: srv, st: st, client: &http.Client{Jar: jar}, origin: base, ui: u}
 }
 
 func (h *harness) do(method, path string, body any, hdr map[string]string) (int, map[string]any) {
@@ -374,5 +375,25 @@ func TestNewRequiresHTTPS(t *testing.T) {
 	}
 	if _, err := New("https://relay.example.com", nil, testToken, slog.Default()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRegistrationClosed(t *testing.T) {
+	h := newHarness(t)
+	k := newSoftKey("localhost", h.origin)
+	h.register(k)
+	h.ui.RegistrationClosed = true
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	if code, _ := h.do("POST", "/ui/api/register/begin", map[string]any{}, auth); code != 403 {
+		t.Fatalf("register/begin while closed: want 403, got %d", code)
+	}
+	if code, _ := h.do("POST", "/ui/api/register/finish", map[string]any{}, auth); code != 403 {
+		t.Fatalf("register/finish while closed: want 403, got %d", code)
+	}
+	if _, me := h.do("GET", "/ui/api/me", nil, nil); me["registration_open"] != false {
+		t.Fatalf("me should report registration closed: %v", me)
+	}
+	if code, res := h.login(k); code != 200 {
+		t.Fatalf("existing passkey must still log in: %d %v", code, res)
 	}
 }

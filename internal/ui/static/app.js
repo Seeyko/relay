@@ -342,7 +342,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const me = await api("me");
     if (me.logged_in) return showApp();
-    if (!me.has_passkeys) $("register").open = true;
+    if (me.registration_open === false) $("register").hidden = true;
+    else if (!me.has_passkeys) $("register").open = true;
   } catch { /* fall through to login */ }
   showLogin();
 });
