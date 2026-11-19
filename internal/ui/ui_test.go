@@ -128,6 +128,7 @@ type harness struct {
 	t      *testing.T
 	srv    *httptest.Server
 	st     *store.Store
+	ui     *UI
 	client *http.Client
 	origin string
 }
@@ -152,7 +153,7 @@ func newHarness(t *testing.T) *harness {
 	srv.Start()
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
-	return &harness{t: t, srv: srv, st: st, client: &http.Client{Jar: jar}, origin: base}
+	return &harness{t: t, srv: srv, st: st, ui: u, client: &http.Client{Jar: jar}, origin: base}
 }
 
 func (h *harness) do(method, path string, body any, hdr map[string]string) (int, map[string]any) {
@@ -352,6 +353,27 @@ func TestPasskeyProtections(t *testing.T) {
 	}
 	if resp.Header.Get("X-Frame-Options") != "DENY" {
 		t.Fatal("missing X-Frame-Options")
+	}
+}
+
+func TestRegistrationOff(t *testing.T) {
+	h := newHarness(t)
+	k := newSoftKey("localhost", h.origin)
+	h.register(k)
+	h.ui.RegistrationOff = true
+
+	if _, me := h.do("GET", "/ui/api/me", nil, nil); me["can_register"] != false {
+		t.Fatalf("me: want can_register false, got %v", me)
+	}
+	auth := map[string]string{"Authorization": "Bearer " + testToken}
+	if code, _ := h.do("POST", "/ui/api/register/begin", map[string]any{"name": "other"}, auth); code != 403 {
+		t.Fatalf("register/begin with registration off: want 403, got %d", code)
+	}
+	if code, _ := h.do("POST", "/ui/api/register/finish", map[string]any{}, auth); code != 403 {
+		t.Fatalf("register/finish with registration off: want 403, got %d", code)
+	}
+	if code, res := h.login(k); code != 200 {
+		t.Fatalf("login with registration off: %d %v", code, res)
 	}
 }
 

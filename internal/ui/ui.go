@@ -51,6 +51,8 @@ type UI struct {
 	APIToken string // required to register a passkey
 	Log      *slog.Logger
 
+	RegistrationOff bool
+
 	origin string // e.g. https://relay.example.com
 	wa     *webauthn.WebAuthn
 	secure bool // cookies get Secure and the __Host- prefix (false only for http://localhost)
@@ -241,7 +243,7 @@ func (ui *UI) me(w http.ResponseWriter, r *http.Request) {
 	if pks, err := ui.Store.ListPasskeys(r.Context()); err == nil {
 		n = len(pks)
 	}
-	writeJSON(w, 200, map[string]any{"logged_in": ui.loggedIn(r), "has_passkeys": n > 0})
+	writeJSON(w, 200, map[string]any{"logged_in": ui.loggedIn(r), "has_passkeys": n > 0, "can_register": !ui.RegistrationOff})
 }
 
 func (ui *UI) logout(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +326,10 @@ func (ui *UI) tokenOK(r *http.Request) bool {
 }
 
 func (ui *UI) registerBegin(w http.ResponseWriter, r *http.Request) {
+	if ui.RegistrationOff {
+		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_PASSKEY_REGISTRATION=off)")
+		return
+	}
 	if !ui.tokenOK(r) {
 		ui.Log.Warn("dashboard: passkey registration refused (bad API token)", "ip", clientIP(r))
 		jsonErr(w, http.StatusUnauthorized, "the admin API token is required to add a passkey")
@@ -365,6 +371,10 @@ func (ui *UI) registerBegin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ui *UI) registerFinish(w http.ResponseWriter, r *http.Request) {
+	if ui.RegistrationOff {
+		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_PASSKEY_REGISTRATION=off)")
+		return
+	}
 	if !ui.tokenOK(r) {
 		jsonErr(w, http.StatusUnauthorized, "the admin API token is required to add a passkey")
 		return
