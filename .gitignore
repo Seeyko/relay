@@ -1,0 +1,5 @@
+/data/
+/relay
+.env
+*.db
+*.db-*
