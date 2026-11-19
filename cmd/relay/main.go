@@ -138,6 +138,7 @@ func run(log *slog.Logger) error {
 		if err != nil {
 			log.Warn("dashboard disabled", "err", err)
 		} else {
+			dash.RegistrationClosed = os.Getenv("RELAY_UI_REGISTRATION") == "off"
 			a.UI = dash
 		}
 	}
