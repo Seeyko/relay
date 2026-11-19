@@ -6,7 +6,11 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 
 - Schedule posts and threads on several accounts at once, with images and videos
 - Publish on time (built-in scheduler, automatic retries on temporary errors)
-- Pull metrics and comments, reply to comments
+- **Analytics agents can act on**: metric snapshots over time (growth curves at 1h / 24h / 7d), follower growth,
+  normalized metrics across networks (views, likes, comments, shares, saves, engagement rate), comparisons with
+  the previous period, breakdowns by network, hour, weekday, format or hashtag, and read-only SQL
+- Read and reply to comments
+- Pre-flight validation (character limits, media rules) and a **drafts-only API key** for sub-agents
 - Import an account's history (build a "my content" archive)
 - Signed webhooks (`post.scheduled`, `post.published`, `post.failed`, `comment.new`)
 - A task queue for a local browser agent, for networks without a usable API
@@ -53,7 +57,9 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_ADDR` | `:8080` | Listen address |
 | `RELAY_DATA_DIR` | `./data` (`/data` in Docker) | SQLite database and media files |
 | `RELAY_TICK` | `30s` | How often due posts are checked |
-| `RELAY_COLLECT_INTERVAL` | `6h` | How often metrics and comments are refreshed (`0s` disables) |
+| `RELAY_COLLECT_INTERVAL` | `1h` | Collector tick. Posts are refreshed hourly for 48h, every 6h until 7 days, then daily (`0s` disables) |
+| `RELAY_TIMEZONE` | `UTC` | Timezone used to group analytics by day and hour |
+| `RELAY_DRAFT_TOKEN` | | Optional second key that can only create and edit drafts |
 | `RELAY_WEBHOOK_URL` / `RELAY_WEBHOOK_SECRET` | | Webhook target and HMAC secret |
 | `RELAY_AGENT_INSTRUCTIONS` | | Extra instructions sent to MCP clients (timezone, tone, languages...) |
 | `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET` | | Optional X bootstrap |
@@ -78,9 +84,19 @@ With Claude Code:
 claude mcp add --transport http relay https://<your-host>/mcp --header "Authorization: Bearer $RELAY_API_TOKEN"
 ```
 
-Tools: `list_providers`, `list_accounts`, `connect_account`, `schedule_post`, `list_posts`, `get_post`,
-`update_post`, `delete_post`, `publish_now`, `upload_media_from_url`, `refresh_metrics`, `get_stats`,
-`list_comments`, `reply_comment`, `import_history`, `create_browser_task`, `list_browser_tasks`.
+Tools:
+
+- Accounts: `list_providers`, `list_accounts`, `connect_account`, `import_history`
+- Posts: `validate_post`, `schedule_post`, `list_posts`, `get_post`, `update_post`, `approve_post`, `delete_post`, `publish_now`, `upload_media_from_url`
+- Analytics: `analyze`, `post_timeline`, `account_growth`, `refresh_metrics`, `sql_query`
+- Conversations: `list_comments`, `reply_comment`
+- Browser agent: `create_browser_task`, `list_browser_tasks`
+
+### Drafts-only keys
+
+Set `RELAY_DRAFT_TOKEN` and give that key to sub-agents. With it, `schedule_post` always creates drafts,
+`update_post` only edits drafts, and publishing, replying, approving and account changes are hidden and refused.
+An admin key (or a human) releases drafts with `approve_post`.
 
 ## REST API
 
@@ -98,7 +114,12 @@ Every route except `/healthz` and `/media/*` requires `Authorization: Bearer <RE
 | GET | `/v1/posts/{id}/comments`, `/v1/comments` | `list_comments` |
 | POST | `/v1/comments/reply` | `reply_comment` |
 | POST | `/v1/metrics/refresh` | `refresh_metrics` |
-| GET | `/v1/stats` | `get_stats` |
+| GET | `/v1/analytics` | `analyze` |
+| GET | `/v1/posts/{id}/timeline` | `post_timeline` |
+| GET | `/v1/accounts/growth` | `account_growth` |
+| POST | `/v1/query` | `sql_query` |
+| POST | `/v1/posts/validate` | `validate_post` |
+| POST | `/v1/posts/{id}/approve` | `approve_post` |
 | GET / POST | `/v1/media` | list / upload (multipart `file` or JSON `{"url"}`) |
 | GET / POST | `/v1/agent/tasks` | `list_browser_tasks` / `create_browser_task` |
 | POST | `/v1/agent/tasks/claim`, `/v1/agent/tasks/{id}/result` | used by the browser agent |
