@@ -57,8 +57,8 @@ function msg(el, text, kind) {
 
 async function login() {
   const out = $("login-msg");
-  if (!window.PublicKeyCredential) return msg(out, "This browser does not support passkeys.", "err");
-  msg(out, "Waiting for your passkey...");
+  if (!window.PublicKeyCredential) return msg(out, "No passkey support.", "err");
+  msg(out, "");
   try {
     const opts = await api("login/begin", { method: "POST", body: {} });
     const pk = opts.publicKey;
@@ -81,7 +81,7 @@ async function login() {
     msg(out, "");
     showApp();
   } catch (e) {
-    msg(out, e.name === "NotAllowedError" ? "Cancelled or timed out." : "Sign-in failed: " + e.message, "err");
+    msg(out, e.name === "NotAllowedError" ? "" : e.message, "err");
   }
 }
 
@@ -89,10 +89,10 @@ async function register() {
   const out = $("reg-msg");
   const tokenEl = $("reg-token");
   const token = tokenEl.value.trim();
-  if (!token) return msg(out, "Enter the API token.", "err");
-  msg(out, "Follow your browser's prompt...");
+  if (!token) return;
+  msg(out, "");
   try {
-    const opts = await api("register/begin", { method: "POST", body: { name: $("reg-name").value }, token });
+    const opts = await api("register/begin", { method: "POST", body: {}, token });
     const pk = opts.publicKey;
     pk.challenge = b64uToBuf(pk.challenge);
     pk.user.id = b64uToBuf(pk.user.id);
@@ -110,10 +110,9 @@ async function register() {
         },
       },
     });
-    msg(out, "Passkey added. You can sign in now.", "ok");
+    msg(out, "Added.");
   } catch (e) {
-    msg(out, e.name === "InvalidStateError" ? "This authenticator is already registered." :
-      e.name === "NotAllowedError" ? "Cancelled or timed out." : "Failed: " + e.message, "err");
+    msg(out, e.name === "InvalidStateError" ? "Already added." : e.name === "NotAllowedError" ? "" : e.message, "err");
   } finally {
     tokenEl.value = ""; // never keep the token around
   }
@@ -130,9 +129,10 @@ function startOfDay(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x
 function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
 function startOfWeek(d) { const x = startOfDay(d); const wd = (x.getDay() + 6) % 7; return addDays(x, -wd); }
 function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
-const fmtTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+const fmtTime = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const fmtMonth = new Intl.DateTimeFormat(undefined, { month: "short" });
 const fmtDay = new Intl.DateTimeFormat(undefined, { weekday: "short" });
-const fmtLong = new Intl.DateTimeFormat(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+const fmtDayMonth = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" });
 const fmtShort = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short" });
 
 function range() {
@@ -165,9 +165,7 @@ function el(tag, cls, text) {
   return e;
 }
 
-function netVar(p) { return NETS.includes(p.provider) ? `var(--${p.provider})` : "var(--muted)"; }
-
-function statusLabel(p) { return p.source === "imported" ? "imported" : p.status; }
+function netVar(p) { return NETS.includes(p.provider) ? `var(--${p.provider})` : "var(--soft)"; }
 
 function thumb(p) {
   const m = p.media.find((m) => m.mime.startsWith("image/")) || p.media[0];
@@ -182,31 +180,21 @@ function thumb(p) {
   return i;
 }
 
-function card(p, large) {
-  const c = el("button", "card");
-  c.type = "button";
-  c.style.setProperty("--net", netVar(p));
-  const top = el("div", "top");
-  top.append(el("span", "time", fmtTime.format(p.date)), el("span", "dot"));
-  top.lastChild.style.setProperty("--net", netVar(p));
-  top.append(el("span", "", NET_LABEL[p.provider] || p.provider || "?"));
-  const st = statusLabel(p);
-  top.append(el("span", "status s-" + st, st));
-  const text = el("div", "text", p.title ? p.title + " · " + (p.parts[0] || "") : (p.parts[0] || ""));
+function row(p, i) {
+  const r = el("button", "row");
+  r.type = "button";
+  r.style.setProperty("--net", netVar(p));
+  r.style.setProperty("--i", String(i));
+  if (p.status === "published" || p.source === "imported") r.classList.add("done");
+  if (p.status === "failed" || p.status === "draft") r.classList.add(p.status);
+  r.setAttribute("aria-label", `${NET_LABEL[p.provider] || p.provider}, ${fmtTime.format(p.date)}, ${p.status}`);
+  const text = el("span", "text", p.title || p.parts[0] || "");
+  if (p.status === "failed") text.prepend(el("span", "flag", "Failed"));
+  r.append(el("span", "time", fmtTime.format(p.date)), text);
   const t = thumb(p);
-  if (large) {
-    const body = el("div", "body");
-    body.append(top, el("div", "muted small", p.handle ? "@" + p.handle : p.account), text);
-    if (p.parts.length > 1) body.append(el("div", "muted small", `Thread · ${p.parts.length} posts`));
-    if (t) c.append(t);
-    c.append(body);
-  } else {
-    c.append(top);
-    if (t) c.append(t);
-    c.append(text);
-  }
-  c.addEventListener("click", () => openPreview(p));
-  return c;
+  r.append(t || el("span"));
+  r.addEventListener("click", () => openPreview(p));
+  return r;
 }
 
 function visible() { return state.posts.filter((p) => !state.hidden.has(p.provider)); }
@@ -215,12 +203,12 @@ function renderFilters() {
   const box = $("filters");
   box.replaceChildren();
   const present = [...new Set(state.posts.map((p) => p.provider))].filter(Boolean).sort();
+  if (present.length < 2 && !state.hidden.size) return;
   for (const n of present) {
-    const b = el("button", "chip" + (state.hidden.has(n) ? " off" : ""));
+    const b = el("button", state.hidden.has(n) ? "off" : "");
     b.type = "button";
-    const d = el("span", "dot"); d.style.setProperty("--net", NETS.includes(n) ? `var(--${n})` : "var(--muted)");
-    const count = state.posts.filter((p) => p.provider === n).length;
-    b.append(d, document.createTextNode(`${NET_LABEL[n] || n} · ${count}`));
+    const d = el("span", "dot"); d.style.setProperty("--net", NETS.includes(n) ? `var(--${n})` : "var(--soft)");
+    b.append(d, document.createTextNode(NET_LABEL[n] || n));
     b.addEventListener("click", () => { state.hidden.has(n) ? state.hidden.delete(n) : state.hidden.add(n); render(); });
     box.append(b);
   }
@@ -230,47 +218,45 @@ function render() {
   $("v-week").setAttribute("aria-selected", state.view === "week");
   $("v-day").setAttribute("aria-selected", state.view === "day");
   const [from, to] = range();
-  $("range").textContent = state.view === "day" ? fmtLong.format(from)
-    : `${fmtShort.format(from)} – ${fmtShort.format(addDays(to, -1))} ${addDays(to, -1).getFullYear()}`;
+  const last = addDays(to, -1);
+  $("range").textContent = state.view === "day" ? fmtDayMonth.format(from)
+    : from.getMonth() === last.getMonth() ? `${from.getDate()}–${last.getDate()} ${fmtMonth.format(last)}` : `${fmtShort.format(from)} – ${fmtShort.format(last)}`;
   renderFilters();
-  const cal = $("cal");
-  cal.replaceChildren(state.view === "week" ? renderWeek(from) : renderDay());
+  $("cal").replaceChildren(state.view === "week" ? renderWeek(from) : renderDay());
+  const today = $("cal").querySelector(".day.today");
+  if (today && !matchMedia("(min-width: 900px)").matches) today.scrollIntoView({ block: "start" });
+}
+
+function dayBlock(d, ps) {
+  const today = startOfDay(new Date());
+  const box = el("div", "day" + (sameDay(d, today) ? " today" : d < today ? " past" : ""));
+  const head = el("button", "day-head");
+  head.type = "button";
+  head.append(el("span", "n", String(d.getDate())), el("span", "w", fmtDay.format(d)));
+  head.addEventListener("click", () => { state.day = d; state.view = "day"; load(); });
+  box.append(head);
+  ps.forEach((p, i) => box.append(row(p, i)));
+  return box;
 }
 
 function renderWeek(from) {
   const grid = el("div", "week");
-  const today = new Date();
   const posts = visible();
+  const wide = matchMedia("(min-width: 900px)").matches;
   for (let i = 0; i < 7; i++) {
     const d = addDays(from, i);
-    const col = el("div", "day-col" + (sameDay(d, today) ? " today" : ""));
-    const head = el("div", "day-head");
-    head.append(el("span", "", fmtDay.format(d)), el("span", "n", String(d.getDate())));
-    head.title = "Open day";
-    head.addEventListener("click", () => { state.day = d; state.view = "day"; load(); });
-    const list = el("div", "day-list");
     const ps = posts.filter((p) => sameDay(p.date, d));
-    if (!ps.length) list.append(el("div", "empty", "—"));
-    ps.forEach((p) => list.append(card(p, false)));
-    col.append(head, list);
-    grid.append(col);
+    if (ps.length || wide) grid.append(dayBlock(d, ps));
   }
+  if (!grid.children.length) grid.append(el("div", "empty", "Nothing planned."));
   return grid;
 }
 
 function renderDay() {
   const box = el("div", "dayview");
   const posts = visible();
-  if (!posts.length) { box.append(el("div", "empty", "Nothing on this day.")); return box; }
-  const byHour = new Map();
-  posts.forEach((p) => { const h = p.date.getHours(); if (!byHour.has(h)) byHour.set(h, []); byHour.get(h).push(p); });
-  for (const [h, ps] of [...byHour.entries()].sort((a, b) => a[0] - b[0])) {
-    const slot = el("div", "slot");
-    const list = el("div", "day-list");
-    ps.forEach((p) => list.append(card(p, true)));
-    slot.append(el("div", "h", String(h).padStart(2, "0") + ":00"), list);
-    box.append(slot);
-  }
+  if (!posts.length) { box.append(el("div", "empty", "Nothing planned.")); return box; }
+  posts.forEach((p, i) => box.append(row(p, i)));
   return box;
 }
 
@@ -283,10 +269,15 @@ function openPreview(p) {
   body.replaceChildren();
   const head = el("div", "pv-head");
   const d = el("span", "dot"); d.style.setProperty("--net", netVar(p));
-  const st = statusLabel(p);
-  head.append(d, el("strong", "", NET_LABEL[p.provider] || p.provider || "?"),
-    el("span", "muted", p.handle ? "@" + p.handle : p.account), el("span", "status s-" + st, st));
-  body.append(head, el("div", "muted small", fmtLong.format(p.date) + " · " + fmtTime.format(p.date)));
+  head.append(d, document.createTextNode(`${NET_LABEL[p.provider] || p.provider || "?"} · ${fmtDayMonth.format(p.date)} · ${fmtTime.format(p.date)}`));
+  const link = p.remote_url && safeURL(p.remote_url);
+  if (link) {
+    const a = el("a", "", "Open \u2197");
+    a.href = link; a.target = "_blank"; a.rel = "noopener noreferrer";
+    head.append(a);
+  }
+  body.append(head);
+  if (p.error) body.append(el("p", "pv-err", p.error));
   if (p.title) body.append(el("h3", "", p.title));
   if (p.media.length) {
     const g = el("div", "pv-media");
@@ -299,19 +290,9 @@ function openPreview(p) {
     }
     body.append(g);
   }
-  p.parts.forEach((t, i) => {
-    const part = el("div", "pv-part", t);
-    if (p.parts.length > 1) part.prepend(el("div", "muted small", `${i + 1}/${p.parts.length}`));
-    body.append(part);
-  });
-  if (p.error) body.append(el("p", "pv-err", p.error));
-  const link = p.remote_url && safeURL(p.remote_url);
-  if (link) {
-    const a = el("a", "", "Open on " + (NET_LABEL[p.provider] || "the network"));
-    a.href = link; a.target = "_blank"; a.rel = "noopener noreferrer";
-    body.append(el("p")); body.lastChild.append(a);
-  }
+  p.parts.forEach((t) => body.append(el("p", "pv-part", t)));
   $("preview").showModal();
+  $("preview").focus();
 }
 
 // ---------- boot ----------
@@ -330,7 +311,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("logout").addEventListener("click", logout);
   $("prev").addEventListener("click", () => step(-1));
   $("next").addEventListener("click", () => step(1));
-  $("today").addEventListener("click", () => { state.day = startOfDay(new Date()); load(); });
+  $("range").addEventListener("click", () => { state.day = startOfDay(new Date()); load(); });
   $("v-week").addEventListener("click", () => { state.view = "week"; load(); });
   $("v-day").addEventListener("click", () => { state.view = "day"; load(); });
   document.addEventListener("keydown", (e) => {
