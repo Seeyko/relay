@@ -20,23 +20,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/providers"
 	"github.com/Seeyko/relay/internal/secret"
 	"github.com/Seeyko/relay/internal/store"
 )
 
 type Service struct {
-	Store         *store.Store
-	Box           *secret.Box
-	MediaDir      string
-	BaseURL       string // public URL of this Relay instance, used for media links
-	HTTP          *http.Client
-	WebhookURL    string
-	WebhookSecret string
-	MaxAttempts   int
-	Location      *time.Location // owner's timezone, used to group analytics by day/hour
-	Log           *slog.Logger
-	Now           func() time.Time
+	Store    *store.Store
+	Box      *secret.Box
+	MediaDir string
+	// Blob (optional) stores media in an S3-compatible bucket instead of MediaDir.
+	Blob *blob.S3
+	// MediaPublicURL (optional) is a public base URL of the bucket (custom domain or r2.dev). When empty,
+	// media stay private in the bucket and Relay serves them at BaseURL/media/.
+	MediaPublicURL string
+	BaseURL        string // public URL of this Relay instance, used for media links
+	HTTP           *http.Client
+	WebhookURL     string
+	WebhookSecret  string
+	MaxAttempts    int
+	Location       *time.Location // owner's timezone, used to group analytics by day/hour
+	Log            *slog.Logger
+	Now            func() time.Time
 }
 
 func (s *Service) now() time.Time {
@@ -278,9 +284,8 @@ func (s *Service) mediaFiles(ctx context.Context, ids []string) ([]providers.Med
 		if err != nil {
 			return nil, fmt.Errorf("media %s: %w", id, err)
 		}
-		p := m.Path
 		out = append(out, providers.MediaFile{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size,
-			Open:      func() (io.ReadCloser, error) { return os.Open(p) },
+			Open:      func() (io.ReadCloser, error) { return s.OpenMedia(ctx, m) },
 			PublicURL: s.MediaURL(m)})
 	}
 	return out, nil
@@ -696,13 +701,15 @@ func (s *Service) SaveMedia(ctx context.Context, r io.Reader, filename, mimeType
 	if err != nil {
 		return nil, err
 	}
-	n, err := io.Copy(f, io.LimitReader(r, maxMedia+1))
-	f.Close()
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(f, h), io.LimitReader(r, maxMedia+1))
 	if err != nil {
+		f.Close()
 		os.Remove(dst)
 		return nil, err
 	}
 	if n > maxMedia {
+		f.Close()
 		os.Remove(dst)
 		return nil, invalid("media larger than 512 MB")
 	}
@@ -710,7 +717,37 @@ func (s *Service) SaveMedia(ctx context.Context, r io.Reader, filename, mimeType
 		filename = id + ext
 	}
 	m := &store.Media{ID: id, Filename: filepath.Base(filename), Mime: mimeType, Size: n, Path: dst}
+	if s.Blob != nil {
+		// Upload to the bucket, then drop the local copy.
+		key := id + ext
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			err = s.Blob.Put(ctx, key, f, n, hex.EncodeToString(h.Sum(nil)), mimeType)
+		}
+		f.Close()
+		os.Remove(dst)
+		if err != nil {
+			return nil, fmt.Errorf("upload media to bucket: %w", err)
+		}
+		m.Path = store.S3Prefix + key
+	} else {
+		f.Close()
+	}
 	return m, s.Store.CreateMedia(ctx, m)
+}
+
+// OpenMedia reads a media file from disk or from the bucket.
+func (s *Service) OpenMedia(ctx context.Context, m *store.Media) (io.ReadCloser, error) {
+	if !m.InBucket() {
+		return os.Open(m.Path)
+	}
+	if s.Blob == nil {
+		return nil, fmt.Errorf("media %s is in a bucket but no bucket is configured (RELAY_S3_*)", m.ID)
+	}
+	resp, err := s.Blob.Get(ctx, m.Key(), "")
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
 }
 
 func (s *Service) SaveMediaFromURL(ctx context.Context, rawURL string) (*store.Media, error) {
@@ -736,10 +773,13 @@ func (s *Service) SaveMediaFromURL(ctx context.Context, rawURL string) (*store.M
 
 // MediaURL is the public, unauthenticated link of a media file (ids are random, 64 bits).
 func (s *Service) MediaURL(m *store.Media) string {
+	if m.InBucket() && s.MediaPublicURL != "" {
+		return strings.TrimRight(s.MediaPublicURL, "/") + "/" + m.Key()
+	}
 	if s.BaseURL == "" {
 		return ""
 	}
-	return strings.TrimRight(s.BaseURL, "/") + "/media/" + filepath.Base(m.Path)
+	return strings.TrimRight(s.BaseURL, "/") + "/media/" + m.Key()
 }
 
 // ---------- webhooks ----------

@@ -14,10 +14,12 @@ import (
 	"time"
 
 	"github.com/Seeyko/relay/internal/api"
+	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/secret"
 	"github.com/Seeyko/relay/internal/store"
+	"github.com/Seeyko/relay/internal/ui"
 
 	// connectors register themselves
 	_ "github.com/Seeyko/relay/internal/providers/meta"
@@ -95,6 +97,22 @@ func run(log *slog.Logger) error {
 		Log:           log,
 		Location:      time.UTC,
 	}
+	if ep := os.Getenv("RELAY_S3_ENDPOINT"); ep != "" {
+		b := &blob.S3{
+			Endpoint:  ep,
+			Bucket:    os.Getenv("RELAY_S3_BUCKET"),
+			Region:    env("RELAY_S3_REGION", "auto"),
+			AccessKey: os.Getenv("RELAY_S3_ACCESS_KEY_ID"),
+			SecretKey: os.Getenv("RELAY_S3_SECRET_ACCESS_KEY"),
+			HTTP:      svc.HTTP,
+		}
+		if err := b.Validate(); err != nil {
+			return fmt.Errorf("RELAY_S3_*: %w", err)
+		}
+		svc.Blob = b
+		svc.MediaPublicURL = os.Getenv("RELAY_S3_PUBLIC_URL")
+		log.Info("media stored in bucket", "endpoint", ep, "bucket", b.Bucket)
+	}
 	if tz := os.Getenv("RELAY_TIMEZONE"); tz != "" {
 		loc, err := time.LoadLocation(tz)
 		if err != nil {
@@ -115,6 +133,14 @@ func run(log *slog.Logger) error {
 		return errors.New("RELAY_DRAFT_TOKEN must be at least 16 characters and differ from RELAY_API_TOKEN")
 	}
 	a := &api.API{Svc: svc, MCP: server, Token: token, DraftToken: draft, Log: log, Version: version}
+	if os.Getenv("RELAY_UI") != "off" && svc.BaseURL != "" {
+		dash, err := ui.New(svc.BaseURL, st, token, log)
+		if err != nil {
+			log.Warn("dashboard disabled", "err", err)
+		} else {
+			a.UI = dash
+		}
+	}
 	srv := &http.Server{Addr: env("RELAY_ADDR", ":8080"), Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	sched := &core.Scheduler{

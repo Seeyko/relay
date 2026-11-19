@@ -8,13 +8,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/store"
+	"github.com/Seeyko/relay/internal/ui"
 )
 
 type API struct {
@@ -25,6 +28,8 @@ type API struct {
 	DraftToken string
 	Log        *slog.Logger
 	Version    string
+	// UI (optional) is the read-only passkey dashboard mounted under /ui/.
+	UI *ui.UI
 }
 
 func (a *API) Handler() http.Handler {
@@ -39,8 +44,18 @@ func (a *API) Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		http.ServeFile(w, r, filepath.Join(a.Svc.MediaDir, name))
+		local := filepath.Join(a.Svc.MediaDir, name)
+		if _, err := os.Stat(local); err == nil || a.Svc.Blob == nil {
+			http.ServeFile(w, r, local)
+			return
+		}
+		a.serveFromBucket(w, r, name)
 	})
+
+	if a.UI != nil {
+		a.UI.Register(mux)
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/ui/", http.StatusFound) })
+	}
 
 	authed := http.NewServeMux()
 	authed.Handle("POST /mcp", a.MCP)
@@ -266,6 +281,35 @@ func (a *API) uploadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]any{"media": m, "url": a.Svc.MediaURL(m)})
+}
+
+// serveFromBucket streams a media object from the bucket, forwarding Range so video players and
+// networks that download in chunks (Instagram, TikTok) work.
+func (a *API) serveFromBucket(w http.ResponseWriter, r *http.Request, key string) {
+	resp, err := a.Svc.Blob.Get(r.Context(), key, r.Header.Get("Range"))
+	if err != nil {
+		var se *blob.StatusError
+		switch {
+		case errors.As(err, &se) && se.Code == 404:
+			http.NotFound(w, r)
+		case errors.As(err, &se) && se.Code == 416:
+			w.WriteHeader(416)
+		default:
+			a.Log.Warn("media: bucket read failed", "key", key, "err", err)
+			http.Error(w, "media unavailable", http.StatusBadGateway)
+		}
+		return
+	}
+	defer resp.Body.Close()
+	for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
+		if v := resp.Header.Get(h); v != "" {
+			w.Header().Set(h, v)
+		}
+	}
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable") // media ids never change
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
