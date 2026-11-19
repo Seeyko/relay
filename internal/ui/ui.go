@@ -531,17 +531,12 @@ func (ui *UI) calendar(w http.ResponseWriter, r *http.Request) {
 				mediaCache[id] = m
 			}
 			if m != nil {
-				cp.Media = append(cp.Media, calMedia{URL: "/media/" + mediaFile(m), Mime: m.Mime})
+				cp.Media = append(cp.Media, calMedia{URL: "/media/" + m.Key(), Mime: m.Mime})
 			}
 		}
 		out = append(out, cp)
 	}
 	writeJSON(w, 200, map[string]any{"posts": out})
-}
-
-func mediaFile(m *store.Media) string {
-	p := strings.ReplaceAll(m.Path, "\\", "/")
-	return p[strings.LastIndex(p, "/")+1:]
 }
 
 func (ui *UI) passkeys(w http.ResponseWriter, r *http.Request) {

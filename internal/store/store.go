@@ -496,6 +496,18 @@ type Media struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// S3Prefix marks a media Path that lives in the object store; the rest is the object key.
+const S3Prefix = "s3:"
+
+// InBucket reports whether the file is in the object store rather than on local disk.
+func (m *Media) InBucket() bool { return strings.HasPrefix(m.Path, S3Prefix) }
+
+// Key is the public file name (med_<id>.<ext>), the same locally and in the bucket.
+func (m *Media) Key() string {
+	p := strings.ReplaceAll(strings.TrimPrefix(m.Path, S3Prefix), "\\", "/")
+	return p[strings.LastIndex(p, "/")+1:]
+}
+
 func (s *Store) CreateMedia(ctx context.Context, m *Media) error {
 	if m.ID == "" {
 		m.ID = NewID("med")

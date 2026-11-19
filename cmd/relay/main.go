@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Seeyko/relay/internal/api"
+	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/secret"
@@ -95,6 +96,22 @@ func run(log *slog.Logger) error {
 		WebhookSecret: os.Getenv("RELAY_WEBHOOK_SECRET"),
 		Log:           log,
 		Location:      time.UTC,
+	}
+	if ep := os.Getenv("RELAY_S3_ENDPOINT"); ep != "" {
+		b := &blob.S3{
+			Endpoint:  ep,
+			Bucket:    os.Getenv("RELAY_S3_BUCKET"),
+			Region:    env("RELAY_S3_REGION", "auto"),
+			AccessKey: os.Getenv("RELAY_S3_ACCESS_KEY_ID"),
+			SecretKey: os.Getenv("RELAY_S3_SECRET_ACCESS_KEY"),
+			HTTP:      svc.HTTP,
+		}
+		if err := b.Validate(); err != nil {
+			return fmt.Errorf("RELAY_S3_*: %w", err)
+		}
+		svc.Blob = b
+		svc.MediaPublicURL = os.Getenv("RELAY_S3_PUBLIC_URL")
+		log.Info("media stored in bucket", "endpoint", ep, "bucket", b.Bucket)
 	}
 	if tz := os.Getenv("RELAY_TIMEZONE"); tz != "" {
 		loc, err := time.LoadLocation(tz)

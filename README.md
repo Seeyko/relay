@@ -62,6 +62,9 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_TICK` | `30s` | How often due posts are checked |
 | `RELAY_COLLECT_INTERVAL` | `1h` | Collector tick. Posts are refreshed hourly for 48h, every 6h until 7 days, then daily (`0s` disables) |
 | `RELAY_TIMEZONE` | `UTC` | Timezone used to group analytics by day and hour |
+| `RELAY_S3_ENDPOINT`, `RELAY_S3_BUCKET`, `RELAY_S3_ACCESS_KEY_ID`, `RELAY_S3_SECRET_ACCESS_KEY` | | Store media in an S3-compatible bucket (Cloudflare R2, S3, MinIO...) instead of `/data/media` |
+| `RELAY_S3_REGION` | `auto` | Bucket region (`auto` for R2) |
+| `RELAY_S3_PUBLIC_URL` | | Public base URL of the bucket (custom domain or r2.dev). Empty: the bucket stays private and Relay serves media at `/media/` |
 | `RELAY_UI` | `on` | `off` disables the read-only dashboard at `/ui/` |
 | `RELAY_DRAFT_TOKEN` | | Optional second key that can only create and edit drafts |
 | `RELAY_WEBHOOK_URL` / `RELAY_WEBHOOK_SECRET` | | Webhook target and HMAC secret |
@@ -77,7 +80,8 @@ Any Docker host works (Dokploy, Coolify, Portainer, plain Compose):
 3. Mount a persistent volume on `/data`.
 4. Expose port `8080` behind HTTPS and set `RELAY_BASE_URL` to that URL.
 
-Back up `/data/relay.db` and `/data/media`.
+Back up `/data/relay.db` and `/data/media` (or your bucket). Media uploaded before a bucket was configured stay on disk
+and keep working.
 
 ## Dashboard
 
