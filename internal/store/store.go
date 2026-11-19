@@ -133,6 +133,19 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   claimed_at TIMESTAMP,
   done_at TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS passkeys (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL DEFAULT '',
+  credential TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL,
+  last_used_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS ui_sessions (
+  token_hash TEXT PRIMARY KEY,
+  passkey_id TEXT NOT NULL REFERENCES passkeys(id) ON DELETE CASCADE,
+  created_at TIMESTAMP NOT NULL,
+  expires_at TIMESTAMP NOT NULL
+);
 `
 
 func (s *Store) migrate() error {
@@ -776,6 +789,9 @@ func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult,
 	if strings.Contains(lq, "credentials") {
 		return nil, errors.New("account credentials are not queryable")
 	}
+	if strings.Contains(lq, "passkeys") || strings.Contains(lq, "ui_sessions") || strings.Contains(lq, "sqlite_") {
+		return nil, errors.New("dashboard login data is not queryable")
+	}
 	if maxRows <= 0 || maxRows > 1000 {
 		maxRows = 200
 	}
@@ -832,3 +848,89 @@ comments(account_id, remote_id, post_id, author, text, url, created_at, seen_at,
 media(id, filename, mime, size, created_at)
 agent_tasks(id, account_id, kind, payload JSON, status, result, created_at, claimed_at, done_at)
 Use json_extract(metrics, '$.like_count') to read a metric.`
+
+// ---------- dashboard passkeys and sessions ----------
+
+type Passkey struct {
+	ID         string     `json:"id"` // base64url credential id
+	Name       string     `json:"name"`
+	Credential string     `json:"-"` // JSON-encoded webauthn credential (public key, sign count, flags)
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+}
+
+func (s *Store) AddPasskey(ctx context.Context, p *Passkey) error {
+	p.CreatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO passkeys(id,name,credential,created_at) VALUES(?,?,?,?)`, p.ID, p.Name, p.Credential, p.CreatedAt)
+	return err
+}
+
+func (s *Store) ListPasskeys(ctx context.Context) ([]*Passkey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,credential,created_at,last_used_at FROM passkeys ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Passkey{}
+	for rows.Next() {
+		p := &Passkey{}
+		var last sql.NullTime
+		if err := rows.Scan(&p.ID, &p.Name, &p.Credential, &p.CreatedAt, &last); err != nil {
+			return nil, err
+		}
+		if last.Valid {
+			t := last.Time
+			p.LastUsedAt = &t
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// TouchPasskey stores the credential after a login (new sign count) and the time it was used.
+func (s *Store) TouchPasskey(ctx context.Context, id, credential string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE passkeys SET credential=?, last_used_at=? WHERE id=?`, credential, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeletePasskey(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM passkeys WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CreateUISession(ctx context.Context, tokenHash, passkeyID string, expires time.Time) error {
+	now := time.Now().UTC()
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM ui_sessions WHERE expires_at < ?`, now)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO ui_sessions(token_hash,passkey_id,created_at,expires_at) VALUES(?,?,?,?)`, tokenHash, passkeyID, now, expires.UTC())
+	return err
+}
+
+// UISessionValid reports whether a session exists and has not expired.
+func (s *Store) UISessionValid(ctx context.Context, tokenHash string) (bool, error) {
+	var exp time.Time
+	err := s.db.QueryRowContext(ctx, `SELECT expires_at FROM ui_sessions WHERE token_hash=?`, tokenHash).Scan(&exp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return time.Now().Before(exp), nil
+}
+
+func (s *Store) DeleteUISession(ctx context.Context, tokenHash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM ui_sessions WHERE token_hash=?`, tokenHash)
+	return err
+}

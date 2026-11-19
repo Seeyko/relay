@@ -15,6 +15,7 @@ import (
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/store"
+	"github.com/Seeyko/relay/internal/ui"
 )
 
 type API struct {
@@ -25,6 +26,8 @@ type API struct {
 	DraftToken string
 	Log        *slog.Logger
 	Version    string
+	// UI (optional) is the read-only passkey dashboard mounted under /ui/.
+	UI *ui.UI
 }
 
 func (a *API) Handler() http.Handler {
@@ -41,6 +44,11 @@ func (a *API) Handler() http.Handler {
 		}
 		http.ServeFile(w, r, filepath.Join(a.Svc.MediaDir, name))
 	})
+
+	if a.UI != nil {
+		a.UI.Register(mux)
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/ui/", http.StatusFound) })
+	}
 
 	authed := http.NewServeMux()
 	authed.Handle("POST /mcp", a.MCP)

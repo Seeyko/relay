@@ -18,6 +18,7 @@ import (
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/secret"
 	"github.com/Seeyko/relay/internal/store"
+	"github.com/Seeyko/relay/internal/ui"
 
 	// connectors register themselves
 	_ "github.com/Seeyko/relay/internal/providers/meta"
@@ -115,6 +116,14 @@ func run(log *slog.Logger) error {
 		return errors.New("RELAY_DRAFT_TOKEN must be at least 16 characters and differ from RELAY_API_TOKEN")
 	}
 	a := &api.API{Svc: svc, MCP: server, Token: token, DraftToken: draft, Log: log, Version: version}
+	if os.Getenv("RELAY_UI") != "off" && svc.BaseURL != "" {
+		dash, err := ui.New(svc.BaseURL, st, token, log)
+		if err != nil {
+			log.Warn("dashboard disabled", "err", err)
+		} else {
+			a.UI = dash
+		}
+	}
 	srv := &http.Server{Addr: env("RELAY_ADDR", ":8080"), Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	sched := &core.Scheduler{

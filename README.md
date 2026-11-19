@@ -62,6 +62,7 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_TICK` | `30s` | How often due posts are checked |
 | `RELAY_COLLECT_INTERVAL` | `1h` | Collector tick. Posts are refreshed hourly for 48h, every 6h until 7 days, then daily (`0s` disables) |
 | `RELAY_TIMEZONE` | `UTC` | Timezone used to group analytics by day and hour |
+| `RELAY_UI` | `on` | `off` disables the read-only dashboard at `/ui/` |
 | `RELAY_DRAFT_TOKEN` | | Optional second key that can only create and edit drafts |
 | `RELAY_WEBHOOK_URL` / `RELAY_WEBHOOK_SECRET` | | Webhook target and HMAC secret |
 | `RELAY_AGENT_INSTRUCTIONS` | | Extra instructions sent to MCP clients (timezone, tone, languages...) |
@@ -77,6 +78,16 @@ Any Docker host works (Dokploy, Coolify, Portainer, plain Compose):
 4. Expose port `8080` behind HTTPS and set `RELAY_BASE_URL` to that URL.
 
 Back up `/data/relay.db` and `/data/media`.
+
+## Dashboard
+
+A minimal, read-only calendar at `https://<your-host>/ui/`: week and day views of every post across networks, with a
+preview of the text, media, status and errors. It cannot publish or edit anything.
+
+Login is passkey-only (WebAuthn, with user verification: Touch ID, Windows Hello, a security key...). To add a
+passkey, open the page, expand "Add a passkey" and enter `RELAY_API_TOKEN` once. Sessions last 12 hours and use a
+`__Host-` cookie (Secure, HttpOnly, SameSite=Strict). The dashboard needs `RELAY_BASE_URL` on https; set
+`RELAY_UI=off` to disable it.
 
 ## Use it from an agent (MCP)
 
@@ -103,7 +114,7 @@ An admin key (or a human) releases drafts with `approve_post`.
 
 ## REST API
 
-Every route except `/healthz` and `/media/*` requires `Authorization: Bearer <RELAY_API_TOKEN>`.
+Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own passkey login) requires `Authorization: Bearer <RELAY_API_TOKEN>`.
 
 | Method | Route | Equivalent tool |
 | --- | --- | --- |
