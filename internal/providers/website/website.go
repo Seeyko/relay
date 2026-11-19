@@ -24,6 +24,12 @@ func init() {
 		Description: "Any website implementing the Relay Site Protocol v1 (articles, media, metrics, comments). " +
 			"Post body = Markdown; options: title, slug, excerpt, tags, lang, cover (media id), status (published|draft), extra.",
 		CredentialFields: []string{"base_url", "token"},
+		Validate: func(req providers.PublishRequest) []string {
+			if t, _ := req.Options["title"].(string); strings.TrimSpace(t) == "" {
+				return []string{"website articles need options.title"}
+			}
+			return nil
+		},
 		New: func(c map[string]string, _ func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			if c["base_url"] == "" || c["token"] == "" {
 				return nil, errors.New("website: base_url and token are required")

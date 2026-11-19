@@ -18,7 +18,9 @@ import (
 var ErrNotFound = errors.New("not found")
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	ro   *sql.DB // read-only handle for agent SQL queries
+	path string
 }
 
 func Open(path string) (*Store, error) {
@@ -28,15 +30,25 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // SQLite: one writer, keeps things simple and safe
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	ro, err := sql.Open("sqlite", fmt.Sprintf("file:%s?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)", path))
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	ro.SetMaxOpenConns(2)
+	s.ro = ro
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.ro.Close()
+	return s.db.Close()
+}
 
 func NewID(prefix string) string {
 	b := make([]byte, 8)
@@ -98,6 +110,18 @@ CREATE TABLE IF NOT EXISTS comments (
   replied INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (account_id, remote_id)
 );
+CREATE TABLE IF NOT EXISTS metric_snapshots (
+  post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  at TIMESTAMP NOT NULL,
+  metrics TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS metric_snapshots_post ON metric_snapshots(post_id, at);
+CREATE TABLE IF NOT EXISTS account_snapshots (
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  at TIMESTAMP NOT NULL,
+  metrics TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS account_snapshots_acc ON account_snapshots(account_id, at);
 CREATE TABLE IF NOT EXISTS agent_tasks (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL DEFAULT '',
@@ -297,6 +321,7 @@ func (s *Store) UpsertImported(ctx context.Context, p *Post) (created bool, err 
 	var id string
 	err = s.db.QueryRowContext(ctx, `SELECT id FROM posts WHERE account_id=? AND remote_id=?`, p.AccountID, p.RemoteID).Scan(&id)
 	if err == nil {
+		p.ID = id
 		_, err = s.db.ExecContext(ctx, `UPDATE posts SET metrics=?, metrics_at=?, updated_at=? WHERE id=?`, js(p.Metrics), time.Now().UTC(), time.Now().UTC(), id)
 		return false, err
 	}
@@ -672,3 +697,138 @@ func (s *Store) ListTasks(ctx context.Context, status string) ([]*AgentTask, err
 	}
 	return out, rows.Err()
 }
+
+// ---------- Metric history ----------
+
+type Snapshot struct {
+	At      time.Time        `json:"at"`
+	Metrics map[string]int64 `json:"metrics"`
+}
+
+func (s *Store) AddPostSnapshot(ctx context.Context, postID string, at time.Time, m map[string]int64) error {
+	if len(m) == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO metric_snapshots(post_id,at,metrics) VALUES(?,?,?)`, postID, at.UTC(), js(m))
+	return err
+}
+
+func (s *Store) AddAccountSnapshot(ctx context.Context, accountID string, at time.Time, m map[string]int64) error {
+	if len(m) == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO account_snapshots(account_id,at,metrics) VALUES(?,?,?)`, accountID, at.UTC(), js(m))
+	return err
+}
+
+func (s *Store) snapshots(ctx context.Context, q string, args ...any) ([]Snapshot, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Snapshot{}
+	for rows.Next() {
+		var sn Snapshot
+		var m string
+		if err := rows.Scan(&sn.At, &m); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(m), &sn.Metrics)
+		out = append(out, sn)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) PostSnapshots(ctx context.Context, postID string) ([]Snapshot, error) {
+	return s.snapshots(ctx, `SELECT at, metrics FROM metric_snapshots WHERE post_id=? ORDER BY at`, postID)
+}
+
+func (s *Store) AccountSnapshots(ctx context.Context, accountID string, since time.Time) ([]Snapshot, error) {
+	return s.snapshots(ctx, `SELECT at, metrics FROM account_snapshots WHERE account_id=? AND at >= ? ORDER BY at`, accountID, since.UTC())
+}
+
+// ---------- Read-only SQL for agents ----------
+
+type QueryResult struct {
+	Columns   []string `json:"columns"`
+	Rows      [][]any  `json:"rows"`
+	Truncated bool     `json:"truncated"`
+}
+
+var forbiddenSQL = []string{"attach", "detach", "pragma", "vacuum", "load_extension"}
+
+// Query runs one read-only statement (SELECT / WITH) on a query_only connection.
+// Account credentials are never readable.
+func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult, error) {
+	lq := strings.ToLower(strings.TrimSpace(q))
+	if !strings.HasPrefix(lq, "select") && !strings.HasPrefix(lq, "with") {
+		return nil, errors.New("only SELECT or WITH queries are allowed")
+	}
+	if strings.Contains(strings.TrimRight(lq, "; \n\t"), ";") {
+		return nil, errors.New("one statement only")
+	}
+	for _, f := range forbiddenSQL {
+		if strings.Contains(lq, f) {
+			return nil, fmt.Errorf("%q is not allowed", f)
+		}
+	}
+	if strings.Contains(lq, "credentials") {
+		return nil, errors.New("account credentials are not queryable")
+	}
+	if maxRows <= 0 || maxRows > 1000 {
+		maxRows = 200
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, err := s.ro.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	keep := []int{}
+	res := &QueryResult{Rows: [][]any{}}
+	for i, c := range cols {
+		if strings.EqualFold(c, "credentials") { // SELECT * on accounts: hide the (encrypted) secrets
+			continue
+		}
+		keep = append(keep, i)
+		res.Columns = append(res.Columns, c)
+	}
+	for rows.Next() {
+		if len(res.Rows) >= maxRows {
+			res.Truncated = true
+			break
+		}
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		row := make([]any, 0, len(keep))
+		for _, i := range keep {
+			v := vals[i]
+			if b, ok := v.([]byte); ok {
+				v = string(b)
+			}
+			row = append(row, v)
+		}
+		res.Rows = append(res.Rows, row)
+	}
+	return res, rows.Err()
+}
+
+// Schema is shown to agents so they can write queries.
+const Schema = `accounts(id, provider, name, handle, remote_user_id, created_at)
+posts(id, group_id, account_id, status, parts JSON array, media JSON array, options JSON, scheduled_at, published_at,
+      remote_id, remote_ids JSON, remote_url, error, attempts, metrics JSON (latest), metrics_at, source 'relay'|'imported', created_at)
+metric_snapshots(post_id, at, metrics JSON)      -- one row per collection, for growth curves
+account_snapshots(account_id, at, metrics JSON)  -- followers, following, posts over time
+comments(account_id, remote_id, post_id, author, text, url, created_at, seen_at, replied 0|1)
+media(id, filename, mime, size, created_at)
+agent_tasks(id, account_id, kind, payload JSON, status, result, created_at, claimed_at, done_at)
+Use json_extract(metrics, '$.like_count') to read a metric.`

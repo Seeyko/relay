@@ -59,6 +59,8 @@ type HistoryItem struct {
 	URL       string
 	CreatedAt time.Time
 	Metrics   map[string]int64
+	// Kind classifies the post when the network tells us: text, image, video, carousel, reply, repost, quote, article.
+	Kind string
 }
 
 // Identity is what we learn about the account when it is connected.
@@ -78,6 +80,13 @@ type Client interface {
 	History(ctx context.Context, since time.Time, max int) ([]HistoryItem, error)
 }
 
+// AccountStatser is implemented by clients that can report account-level counters
+// (followers, following, total posts...). Keys should use the normalized names when possible:
+// followers, following, posts, likes_total, views_total.
+type AccountStatser interface {
+	AccountMetrics(ctx context.Context) (map[string]int64, error)
+}
+
 // Factory builds a client from decrypted credentials. persist lets a client save refreshed tokens.
 type Factory struct {
 	Name        string
@@ -85,7 +94,13 @@ type Factory struct {
 	// CredentialFields documents what the account creation call must provide.
 	CredentialFields []string
 	New              func(creds map[string]string, persist func(map[string]string) error, hc *http.Client) (Client, error)
+	// Validate checks a post before it is scheduled (character limits, required media...).
+	// It returns human-readable problems; nil means OK. Optional.
+	Validate func(req PublishRequest) []string
 }
+
+// CharCount counts characters the way most networks do (Unicode code points).
+func CharCount(s string) int { return len([]rune(s)) }
 
 var registry = map[string]Factory{}
 

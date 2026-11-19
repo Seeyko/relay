@@ -113,6 +113,8 @@ type ScheduleInput struct {
 	Options     map[string]any `json:"options"`
 	// PerAccount overrides text per account id (e.g. shorter version for X).
 	PerAccount map[string]string `json:"per_account"`
+	// Force skips the pre-flight validation.
+	Force bool `json:"force"`
 }
 
 func (in *ScheduleInput) parts() []string {
@@ -161,8 +163,13 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 		}
 		accs = append(accs, a)
 	}
+	files, err := s.mediaFiles(ctx, in.Media)
+	if err != nil {
+		return nil, err
+	}
 	group := store.NewID("grp")
-	var out []*store.Post
+	plan := map[string][]string{}
+	var problems []string
 	for _, a := range accs {
 		parts := in.parts()
 		if t, ok := in.PerAccount[a.ID]; ok {
@@ -171,7 +178,24 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 		if len(parts) == 0 {
 			return nil, invalid("no text for account %s", a.ID)
 		}
-		p := &store.Post{GroupID: group, AccountID: a.ID, Status: status, Parts: parts, Media: in.Media, Options: in.Options, ScheduledAt: at}
+		plan[a.ID] = parts
+		if !in.Force {
+			for _, pr := range s.validate(a, parts, files, in.Options) {
+				problems = append(problems, a.Provider+" ("+a.ID+"): "+pr)
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return nil, invalid("post rejected by pre-flight checks (use force to override): %s", strings.Join(problems, "; "))
+	}
+	var out []*store.Post
+	for _, a := range accs {
+		opts := map[string]any{}
+		for k, v := range in.Options {
+			opts[k] = v
+		}
+		opts["kind"] = kindOf(plan[a.ID], files, opts)
+		p := &store.Post{GroupID: group, AccountID: a.ID, Status: status, Parts: plan[a.ID], Media: in.Media, Options: opts, ScheduledAt: at}
 		if err := s.Store.CreatePost(ctx, p); err != nil {
 			return nil, err
 		}
@@ -313,6 +337,19 @@ func (s *Service) publish(ctx context.Context, p *store.Post) error {
 	if err != nil {
 		return err
 	}
+	// Resume a thread that stopped half-way: publish only the missing parts, chained to the last one sent.
+	if done := len(p.RemoteIDs); done > 0 && done < len(p.Parts) {
+		opts := map[string]any{}
+		for k, v := range p.Options {
+			opts[k] = v
+		}
+		opts["reply_to"] = p.RemoteIDs[done-1]
+		res, err := cl.Publish(ctx, providers.PublishRequest{Parts: p.Parts[done:], Options: opts})
+		if res != nil {
+			p.RemoteIDs = append(p.RemoteIDs, res.RemoteIDs...)
+		}
+		return err
+	}
 	res, err := cl.Publish(ctx, providers.PublishRequest{Parts: p.Parts, Media: media, Options: p.Options})
 	if res != nil {
 		p.RemoteID, p.RemoteIDs, p.RemoteURL = res.RemoteID, res.RemoteIDs, res.URL
@@ -323,10 +360,85 @@ func (s *Service) publish(ctx context.Context, p *store.Post) error {
 	return err
 }
 
+// validate runs the provider's pre-flight checks.
+func (s *Service) validate(a *store.Account, parts []string, media []providers.MediaFile, opts map[string]any) []string {
+	f, err := providers.Get(a.Provider)
+	if err != nil || f.Validate == nil {
+		return nil
+	}
+	return f.Validate(providers.PublishRequest{Parts: parts, Media: media, Options: opts})
+}
+
+type ValidationResult struct {
+	AccountID string   `json:"account_id"`
+	Provider  string   `json:"provider"`
+	OK        bool     `json:"ok"`
+	Problems  []string `json:"problems"`
+	Chars     []int    `json:"chars_per_part"`
+}
+
+// Validate checks a post against every target network without scheduling it.
+func (s *Service) Validate(ctx context.Context, in ScheduleInput) ([]ValidationResult, error) {
+	files, err := s.mediaFiles(ctx, in.Media)
+	if err != nil {
+		return nil, invalid("%v", err)
+	}
+	var out []ValidationResult
+	for _, id := range in.AccountIDs {
+		a, err := s.Store.GetAccount(ctx, id)
+		if err != nil {
+			return nil, invalid("unknown account %q", id)
+		}
+		parts := in.parts()
+		if t, ok := in.PerAccount[a.ID]; ok {
+			parts = []string{t}
+		}
+		r := ValidationResult{AccountID: a.ID, Provider: a.Provider, Problems: s.validate(a, parts, files, in.Options)}
+		if len(parts) == 0 {
+			r.Problems = append(r.Problems, "no text")
+		}
+		for _, p := range parts {
+			r.Chars = append(r.Chars, providers.CharCount(p))
+		}
+		r.OK = len(r.Problems) == 0
+		if r.Problems == nil {
+			r.Problems = []string{}
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func kindOf(parts []string, media []providers.MediaFile, opts map[string]any) string {
+	if k, _ := opts["kind"].(string); k != "" {
+		return k
+	}
+	if _, ok := opts["reply_to"]; ok {
+		return "reply"
+	}
+	if len(parts) > 1 {
+		return "thread"
+	}
+	switch {
+	case len(media) > 1:
+		return "carousel"
+	case len(media) == 1 && strings.HasPrefix(media[0].Mime, "video/"):
+		return "video"
+	case len(media) == 1:
+		return "image"
+	}
+	return "text"
+}
+
 // ---------- metrics & comments ----------
 
 // RefreshMetrics updates metrics of published posts (all accounts, or one) published after since.
 func (s *Service) RefreshMetrics(ctx context.Context, accountID string, since time.Time) (int, error) {
+	return s.refreshMetrics(ctx, accountID, since, nil)
+}
+
+// refreshMetrics updates metrics (and records a snapshot) of published posts; due filters which posts to fetch.
+func (s *Service) refreshMetrics(ctx context.Context, accountID string, since time.Time, due func(*store.Post) bool) (int, error) {
 	accs, err := s.accounts(ctx, accountID)
 	if err != nil {
 		return 0, err
@@ -334,9 +446,15 @@ func (s *Service) RefreshMetrics(ctx context.Context, accountID string, since ti
 	updated := 0
 	var errs []error
 	for _, acc := range accs {
-		posts, err := s.Store.ListPosts(ctx, store.PostFilter{AccountID: acc.ID, Status: store.StatusPublished, From: &since, Limit: 1000})
+		all, err := s.Store.ListPosts(ctx, store.PostFilter{AccountID: acc.ID, Status: store.StatusPublished, From: &since, Limit: 1000})
 		if err != nil {
 			return updated, err
+		}
+		posts := all[:0]
+		for _, p := range all {
+			if p.RemoteID != "" && (due == nil || due(p)) {
+				posts = append(posts, p)
+			}
 		}
 		if len(posts) == 0 {
 			continue
@@ -361,6 +479,9 @@ func (s *Service) RefreshMetrics(ctx context.Context, accountID string, since ti
 			if v, ok := m[p.RemoteID]; ok {
 				p.Metrics, p.MetricsAt = v, &now
 				if err := s.Store.UpdatePost(ctx, p); err != nil {
+					return updated, err
+				}
+				if err := s.Store.AddPostSnapshot(ctx, p.ID, now, v); err != nil {
 					return updated, err
 				}
 				updated++
@@ -442,8 +563,14 @@ func (s *Service) ImportHistory(ctx context.Context, accountID string, since tim
 	for _, it := range items {
 		ca := it.CreatedAt.UTC()
 		p := &store.Post{AccountID: acc.ID, Parts: []string{it.Text}, RemoteID: it.RemoteID, RemoteIDs: []string{it.RemoteID}, RemoteURL: it.URL, PublishedAt: &ca, Metrics: it.Metrics, CreatedAt: ca}
+		if it.Kind != "" {
+			p.Options = map[string]any{"kind": it.Kind}
+		}
 		isNew, err := s.Store.UpsertImported(ctx, p)
 		if err != nil {
+			return created, updated, err
+		}
+		if err := s.Store.AddPostSnapshot(ctx, p.ID, s.now(), it.Metrics); err != nil {
 			return created, updated, err
 		}
 		if isNew {
@@ -466,15 +593,38 @@ func (s *Service) accounts(ctx context.Context, id string) ([]*store.Account, er
 	return s.Store.ListAccounts(ctx)
 }
 
-// Collect refreshes metrics and comments for posts published in the last `window`.
-func (s *Service) Collect(ctx context.Context, window time.Duration) {
-	since := s.now().Add(-window)
-	if n, err := s.RefreshMetrics(ctx, "", since); err != nil {
-		s.Log.Warn("collect metrics", "updated", n, "err", err)
-	} else {
-		s.Log.Info("collect metrics", "updated", n)
+// MetricsDue implements the collection cadence: hourly for posts younger than 48h, every 6h until 7 days,
+// daily until the end of the tracking window. This builds growth curves while keeping API usage low.
+func MetricsDue(p *store.Post, now time.Time) bool {
+	if p.PublishedAt == nil {
+		return false
 	}
-	posts, err := s.Store.ListPosts(ctx, store.PostFilter{Status: store.StatusPublished, Source: "relay", From: &since, Limit: 500})
+	if p.MetricsAt == nil {
+		return true
+	}
+	age, since := now.Sub(*p.PublishedAt), now.Sub(*p.MetricsAt)
+	slack := 5 * time.Minute // ticks are not exact
+	switch {
+	case age < 48*time.Hour:
+		return since >= time.Hour-slack
+	case age < 7*24*time.Hour:
+		return since >= 6*time.Hour-slack
+	default:
+		return since >= 24*time.Hour-slack
+	}
+}
+
+// Collect refreshes due metrics, account counters and comments of recent posts.
+func (s *Service) Collect(ctx context.Context, window time.Duration) {
+	now := s.now()
+	since := now.Add(-window)
+	n, err := s.refreshMetrics(ctx, "", since, func(p *store.Post) bool { return MetricsDue(p, now) })
+	s.Log.Info("collect metrics", "updated", n, "err", err)
+	if err := s.SnapshotAccounts(ctx); err != nil {
+		s.Log.Warn("collect account metrics", "err", err)
+	}
+	recent := now.Add(-7 * 24 * time.Hour)
+	posts, err := s.Store.ListPosts(ctx, store.PostFilter{Status: store.StatusPublished, Source: "relay", From: &recent, Limit: 500})
 	if err != nil {
 		s.Log.Error("collect comments", "err", err)
 		return
@@ -484,6 +634,42 @@ func (s *Service) Collect(ctx context.Context, window time.Duration) {
 			s.Log.Warn("collect comments", "post", p.ID, "err", err)
 		}
 	}
+}
+
+// SnapshotAccounts records followers/following/posts for every account whose network reports them,
+// at most once every 6 hours per account.
+func (s *Service) SnapshotAccounts(ctx context.Context) error {
+	accs, err := s.Store.ListAccounts(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, a := range accs {
+		last, err := s.Store.AccountSnapshots(ctx, a.ID, s.now().Add(-6*time.Hour+5*time.Minute))
+		if err == nil && len(last) > 0 {
+			continue
+		}
+		if _, err := s.SnapshotAccount(ctx, a); err != nil && !errors.Is(err, providers.ErrUnsupported) {
+			errs = append(errs, fmt.Errorf("%s: %w", a.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *Service) SnapshotAccount(ctx context.Context, a *store.Account) (map[string]int64, error) {
+	cl, err := s.client(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	st, ok := cl.(providers.AccountStatser)
+	if !ok {
+		return nil, providers.ErrUnsupported
+	}
+	m, err := st.AccountMetrics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return m, s.Store.AddAccountSnapshot(ctx, a.ID, s.now(), m)
 }
 
 // ---------- media ----------

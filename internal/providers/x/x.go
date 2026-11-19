@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ func init() {
 		Name:             "x",
 		Description:      "X / Twitter via API v2 (OAuth 1.0a user context). Publishing, threads, images/videos, metrics, replies, history import.",
 		CredentialFields: []string{"consumer_key", "consumer_secret", "access_token", "access_token_secret"},
+		Validate:         validate,
 		New: func(c map[string]string, _ func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			for _, k := range []string{"consumer_key", "consumer_secret", "access_token", "access_token_secret"} {
 				if c[k] == "" {
@@ -42,6 +44,75 @@ func init() {
 			}, nil
 		},
 	})
+}
+
+// validate applies X's limits. options.max_chars raises the per-post limit (Premium allows 25,000).
+func validate(req providers.PublishRequest) []string {
+	var errs []string
+	limit := 280
+	if v, ok := req.Options["max_chars"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	if len(req.Parts) > 25 {
+		errs = append(errs, "X threads are limited to 25 posts here")
+	}
+	for i, p := range req.Parts {
+		if n := WeightedLength(p); n > limit {
+			errs = append(errs, fmt.Sprintf("part %d is %d characters (X limit %d, links count as 23)", i+1, n, limit))
+		}
+		if strings.TrimSpace(p) == "" && !(i == 0 && len(req.Media) > 0) {
+			errs = append(errs, fmt.Sprintf("part %d is empty", i+1))
+		}
+	}
+	videos := 0
+	for _, m := range req.Media {
+		if strings.HasPrefix(m.Mime, "video/") || m.Mime == "image/gif" {
+			videos++
+		}
+	}
+	if len(req.Media) > 4 {
+		errs = append(errs, "X allows at most 4 media per post")
+	}
+	if videos > 0 && len(req.Media) > 1 {
+		errs = append(errs, "a video or GIF must be the only media of an X post")
+	}
+	return errs
+}
+
+var linkRe = regexp.MustCompile(`https?://\S+`)
+
+// WeightedLength approximates X's counting: links count 23, CJK and emoji count 2.
+func WeightedLength(s string) int {
+	n := 0
+	s = linkRe.ReplaceAllStringFunc(s, func(string) string { n += 23; return "" })
+	for _, r := range s {
+		switch {
+		case r <= 0x10FF, r >= 0x2000 && r <= 0x200D, r >= 0x2010 && r <= 0x201F, r >= 0x2032 && r <= 0x2037:
+			n++
+		default:
+			n += 2
+		}
+	}
+	return n
+}
+
+// AccountMetrics returns follower and post counts.
+func (c *Client) AccountMetrics(ctx context.Context) (map[string]int64, error) {
+	var r struct {
+		Data struct {
+			PublicMetrics struct {
+				Followers int64 `json:"followers_count"`
+				Following int64 `json:"following_count"`
+				Tweets    int64 `json:"tweet_count"`
+				Likes     int64 `json:"like_count"`
+			} `json:"public_metrics"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, "GET", "/2/users/me?user.fields=public_metrics", nil, &r); err != nil {
+		return nil, err
+	}
+	m := r.Data.PublicMetrics
+	return map[string]int64{"followers": m.Followers, "following": m.Following, "posts": m.Tweets}, nil
 }
 
 type Client struct {

@@ -433,7 +433,11 @@ func TestMetaProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Instagram refuses text-only posts
-	ps, _ = e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{ig.ID}, Text: "no media"})
+	// Instagram refuses text-only posts: caught by the pre-flight check, and at publish time with force
+	if _, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{ig.ID}, Text: "no media"}); err == nil || !strings.Contains(err.Error(), "pre-flight") {
+		t.Fatalf("ig text-only should be rejected: %v", err)
+	}
+	ps, _ = e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{ig.ID}, Text: "no media", Force: true})
 	if p, _ := e.svc.PublishNow(ctx, ps[0].ID); p.Status != "failed" {
 		t.Fatalf("ig text-only should fail: %+v", p)
 	}

@@ -19,6 +19,22 @@ func init() {
 		Description: "Facebook Page via Graph API with a Page access token (pages_manage_posts, pages_read_engagement, pages_manage_engagement). " +
 			"Text, link (options.link), photos, one video; reactions/comments/shares; comment replies; history import.",
 		CredentialFields: []string{"page_id", "page_access_token"},
+		Validate: func(req providers.PublishRequest) []string {
+			var errs []string
+			if n := providers.CharCount(strings.Join(req.Parts, "\n\n")); n > 63206 {
+				errs = append(errs, fmt.Sprintf("Facebook posts are limited to 63206 characters (got %d)", n))
+			}
+			if len(req.Parts) == 0 && len(req.Media) == 0 {
+				errs = append(errs, "empty post")
+			}
+			for _, m := range req.Media {
+				if strings.HasPrefix(m.Mime, "video/") && len(req.Media) > 1 {
+					errs = append(errs, "a video must be the only media of a Facebook post")
+					break
+				}
+			}
+			return errs
+		},
 		New: func(c map[string]string, _ func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			if c["page_id"] == "" || c["page_access_token"] == "" {
 				return nil, errors.New("facebook: page_id and page_access_token are required")
@@ -52,6 +68,17 @@ func (f *Facebook) Identify(ctx context.Context) (*providers.Identity, error) {
 		return nil, err
 	}
 	return &providers.Identity{RemoteUserID: r.ID, Handle: r.Username, Name: r.Name}, nil
+}
+
+func (f *Facebook) AccountMetrics(ctx context.Context) (map[string]int64, error) {
+	var r struct {
+		Fans      int64 `json:"fan_count"`
+		Followers int64 `json:"followers_count"`
+	}
+	if err := f.g.get(ctx, "/"+f.PageID, url.Values{"fields": {"fan_count,followers_count"}}, &r); err != nil {
+		return nil, err
+	}
+	return map[string]int64{"followers": r.Followers, "page_likes": r.Fans}, nil
 }
 
 func (f *Facebook) permalink(ctx context.Context, id string) string {

@@ -20,6 +20,28 @@ func init() {
 			"Image, carousel, Reels (options.media_type=REELS default for video), stories (options.media_type=STORIES); likes/comments/insights; comment replies. " +
 			"Needs RELAY_BASE_URL reachable from the internet: Instagram downloads the media from Relay. Long-lived token is refreshed automatically.",
 		CredentialFields: []string{"access_token"},
+		Validate: func(req providers.PublishRequest) []string {
+			var errs []string
+			if len(req.Media) == 0 {
+				errs = append(errs, "Instagram needs at least one image or video")
+			}
+			if len(req.Media) > 10 {
+				errs = append(errs, "Instagram carousels take at most 10 media")
+			}
+			caption := strings.Join(req.Parts, "\n\n")
+			if n := providers.CharCount(caption); n > 2200 {
+				errs = append(errs, fmt.Sprintf("Instagram captions are limited to 2200 characters (got %d)", n))
+			}
+			if n := strings.Count(caption, "#"); n > 30 {
+				errs = append(errs, fmt.Sprintf("Instagram allows at most 30 hashtags (got %d)", n))
+			}
+			for _, m := range req.Media {
+				if m.Mime != "" && !strings.HasPrefix(m.Mime, "video/") && m.Mime != "image/jpeg" {
+					errs = append(errs, "Instagram only accepts JPEG images ("+m.Filename+" is "+m.Mime+")")
+				}
+			}
+			return errs
+		},
 		New: func(c map[string]string, persist func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			if c["access_token"] == "" {
 				return nil, errors.New("instagram: access_token is required")
@@ -93,6 +115,18 @@ func (ig *Instagram) Identify(ctx context.Context) (*providers.Identity, error) 
 		name = r.Username
 	}
 	return &providers.Identity{RemoteUserID: id, Handle: r.Username, Name: name}, nil
+}
+
+func (ig *Instagram) AccountMetrics(ctx context.Context) (map[string]int64, error) {
+	var r struct {
+		Followers int64 `json:"followers_count"`
+		Follows   int64 `json:"follows_count"`
+		Media     int64 `json:"media_count"`
+	}
+	if err := ig.g.get(ctx, "/me", url.Values{"fields": {"followers_count,follows_count,media_count"}}, &r); err != nil {
+		return nil, err
+	}
+	return map[string]int64{"followers": r.Followers, "following": r.Follows, "posts": r.Media}, nil
 }
 
 func (ig *Instagram) me(ctx context.Context) (string, error) {
