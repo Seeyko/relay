@@ -10,30 +10,43 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/Seeyko/relay/internal/providers"
 )
 
 const DefaultBaseURL = "https://open.tiktokapis.com"
 
+// Upload limits from the Media Transfer Guide.
 const (
-	minChunk = 5 << 20
-	maxChunk = 64 << 20
-	chunk    = 10 << 20
+	chunkSize   = 10 << 20 // every chunk but the last: inside TikTok's 5-64 MB window whatever "MB" means
+	singleLimit = 20 << 20 // files up to this size go in one chunk (always <= 64 MB)
+	maxVideo    = 4 << 30
+	maxImages   = 35
 )
+
+var privacyLevels = []string{"PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"}
+
+var videoMimes = map[string]bool{"video/mp4": true, "video/quicktime": true, "video/webm": true}
+
+var imageMimes = map[string]bool{"image/jpeg": true, "image/jpg": true, "image/webp": true}
 
 func init() {
 	providers.Register(providers.Factory{
 		Name: "tiktok",
-		Description: "TikTok via the Content Posting API (direct post) and Display API. Scopes: user.info.basic, user.info.stats, " +
-			"video.publish, video.list. Video upload, photo carousels (options.media_type=PHOTO, needs RELAY_BASE_URL on a domain verified in your TikTok app), " +
-			"per-video views/likes/comments/shares, follower counts, history import. Options: privacy_level (default: most public allowed), " +
-			"disable_comment, disable_duet, disable_stitch, title (photo posts), is_aigc, brand_content_toggle. " +
-			"Unaudited apps can only post with privacy SELF_ONLY. Reading/answering comments is not in TikTok's API: use a browser task (kind tiktok.comments).",
+		Description: "TikTok via the Content Posting API (direct post) and Display API. Scopes: user.info.basic, user.info.profile, user.info.stats, " +
+			"video.publish, video.list. One video (MP4/MOV/WebM, max 4 GB) or 1-35 JPEG/WebP images (options.media_type=PHOTO; TikTok pulls them " +
+			"from RELAY_BASE_URL, which must be a domain or URL prefix verified in your TikTok app). Required option: privacy_level " +
+			"(PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, FOLLOWER_OF_CREATOR or SELF_ONLY; TikTok forbids a default, ask the creator). " +
+			"Interactions are off unless enabled: disable_comment, disable_duet, disable_stitch default to true. Other options: title (photo, max 90), " +
+			"is_aigc, brand_organic_toggle (your brand), brand_content_toggle (paid partnership, not with SELF_ONLY), auto_add_music, " +
+			"photo_cover_index, video_cover_timestamp_ms, duration_sec (checked against the creator's max). Unaudited apps can only post SELF_ONLY. " +
+			"Comments are not in TikTok's API for creators: use a browser task (kind tiktok.comments).",
 		CredentialFields: []string{"client_key", "client_secret", "access_token", "refresh_token"},
 		Validate:         validate,
 		New: func(c map[string]string, persist func(map[string]string) error, hc *http.Client) (providers.Client, error) {
@@ -44,41 +57,72 @@ func init() {
 			if base == "" {
 				base = DefaultBaseURL
 			}
+			if hc == nil {
+				hc = http.DefaultClient
+			}
 			return &Client{Base: strings.TrimRight(base, "/"), HC: hc, creds: c, persist: persist}, nil
 		},
 	})
 }
 
+// utf16Len counts UTF-16 code units, the unit TikTok uses for its text limits.
+func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
+
+func isPhoto(req providers.PublishRequest) bool {
+	if t, _ := req.Options["media_type"].(string); strings.EqualFold(t, "PHOTO") {
+		return true
+	}
+	for _, m := range req.Media {
+		if strings.HasPrefix(m.Mime, "video/") {
+			return false
+		}
+	}
+	return len(req.Media) > 0
+}
+
 func validate(req providers.PublishRequest) []string {
 	var errs []string
 	text := strings.Join(req.Parts, "\n\n")
-	photo, _ := req.Options["media_type"].(string)
-	videos, images := 0, 0
-	for _, m := range req.Media {
-		if strings.HasPrefix(m.Mime, "video/") {
-			videos++
-		} else {
-			images++
-		}
+	o := req.Options
+	privacy, _ := o["privacy_level"].(string)
+	if privacy == "" {
+		errs = append(errs, "TikTok requires options.privacy_level chosen by the creator (no default allowed): "+strings.Join(privacyLevels, ", "))
+	} else if !slices.Contains(privacyLevels, privacy) {
+		errs = append(errs, "TikTok privacy_level must be one of "+strings.Join(privacyLevels, ", "))
+	}
+	if b, _ := o["brand_content_toggle"].(bool); b && privacy == "SELF_ONLY" {
+		errs = append(errs, "TikTok branded content (brand_content_toggle) cannot be posted with privacy SELF_ONLY")
 	}
 	switch {
 	case len(req.Media) == 0:
 		errs = append(errs, "TikTok needs a video, or 1 to 35 images with options.media_type=PHOTO")
-	case strings.EqualFold(photo, "PHOTO") || (videos == 0 && images > 0):
-		if videos > 0 {
-			errs = append(errs, "TikTok photo posts cannot contain videos")
-		}
-		if images > 35 {
+	case isPhoto(req):
+		if len(req.Media) > maxImages {
 			errs = append(errs, "TikTok photo posts take at most 35 images")
 		}
-		if providers.CharCount(text) > 4000 {
+		for _, m := range req.Media {
+			if !imageMimes[strings.ToLower(m.Mime)] {
+				errs = append(errs, "TikTok photo posts accept only JPEG or WebP images ("+m.Filename+" is "+m.Mime+")")
+			}
+		}
+		if t, _ := o["title"].(string); utf16Len(t) > 90 {
+			errs = append(errs, "TikTok photo title is limited to 90 characters")
+		}
+		if utf16Len(text) > 4000 {
 			errs = append(errs, "TikTok photo description is limited to 4000 characters")
 		}
 	default:
-		if videos != 1 || images > 0 {
+		if len(req.Media) != 1 {
 			errs = append(errs, "TikTok video posts take exactly one video")
 		}
-		if providers.CharCount(text) > 2200 {
+		m := req.Media[0]
+		if !videoMimes[strings.ToLower(m.Mime)] {
+			errs = append(errs, "TikTok videos must be MP4, MOV or WebM (got "+m.Mime+")")
+		}
+		if m.Size > maxVideo {
+			errs = append(errs, "TikTok videos are limited to 4 GB")
+		}
+		if utf16Len(text) > 2200 {
 			errs = append(errs, "TikTok video caption is limited to 2200 characters")
 		}
 	}
@@ -96,6 +140,7 @@ type Client struct {
 }
 
 // token returns a valid access token, refreshing it (24h lifetime) when needed.
+// TikTok rotates the refresh token on every refresh, so the new one is always persisted.
 func (c *Client) token(ctx context.Context, force bool) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -127,24 +172,35 @@ func (c *Client) token(ctx context.Context, force bool) (string, error) {
 		return "", err
 	}
 	var r struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-		OpenID       string `json:"open_id"`
-		Error        string `json:"error"`
-		ErrorDesc    string `json:"error_description"`
+		AccessToken      string `json:"access_token"`
+		RefreshToken     string `json:"refresh_token"`
+		ExpiresIn        int64  `json:"expires_in"`
+		RefreshExpiresIn int64  `json:"refresh_expires_in"`
+		OpenID           string `json:"open_id"`
+		Scope            string `json:"scope"`
+		Error            string `json:"error"`
+		ErrorDesc        string `json:"error_description"`
+		LogID            string `json:"log_id"`
 	}
 	if err := json.Unmarshal(b, &r); err != nil {
 		return "", err
 	}
 	if r.AccessToken == "" {
-		return "", fmt.Errorf("tiktok: token refresh failed: %s %s", r.Error, r.ErrorDesc)
+		// OAuth errors (invalid_grant...) need a new authorization: retrying will not help.
+		return "", providers.Invalid(fmt.Sprintf("tiktok: token refresh failed: %s %s (log_id %s)", r.Error, r.ErrorDesc, r.LogID))
 	}
+	now := time.Now().Unix()
 	c.creds["access_token"] = r.AccessToken
 	if r.RefreshToken != "" {
 		c.creds["refresh_token"] = r.RefreshToken
 	}
-	c.creds["expires_at"] = strconv.FormatInt(time.Now().Unix()+r.ExpiresIn, 10)
+	c.creds["expires_at"] = strconv.FormatInt(now+r.ExpiresIn, 10)
+	if r.RefreshExpiresIn > 0 {
+		c.creds["refresh_expires_at"] = strconv.FormatInt(now+r.RefreshExpiresIn, 10)
+	}
+	if r.Scope != "" {
+		c.creds["scope"] = r.Scope
+	}
 	if c.persist != nil {
 		_ = c.persist(c.creds)
 	}
@@ -157,7 +213,27 @@ type apiError struct {
 	LogID   string `json:"log_id"`
 }
 
-// call sends a JSON request and decodes `data`. TikTok wraps errors in {"error":{"code":...}}.
+// statusFor maps TikTok error codes to HTTP statuses so providers.Retryable classifies them.
+// Some errors (spam_risk_*) come back with HTTP 200 on creator_info.
+func statusFor(code string, status int) int {
+	switch {
+	case code == "rate_limit_exceeded":
+		return 429
+	case code == "internal_error":
+		return 500
+	case code == "access_token_invalid" || code == "scope_not_authorized":
+		return 401
+	case strings.HasPrefix(code, "spam_risk") || code == "reached_active_user_cap" ||
+		code == "unaudited_client_can_only_post_to_private_accounts" || code == "url_ownership_unverified" ||
+		code == "privacy_level_option_mismatch":
+		return 403
+	case status >= 400:
+		return status
+	}
+	return 400
+}
+
+// call sends a request (JSON body for POST) and decodes `data`. TikTok wraps errors in {"error":{"code":...}}.
 func (c *Client) call(ctx context.Context, method, path string, body any, data any) error {
 	for attempt := 0; attempt < 2; attempt++ {
 		tok, err := c.token(ctx, attempt > 0)
@@ -177,36 +253,42 @@ func (c *Client) call(ctx context.Context, method, path string, body any, data a
 			return err
 		}
 		req.Header.Set("Authorization", "Bearer "+tok)
-		if body != nil {
+		if method == "POST" {
 			req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 		}
 		resp, err := c.HC.Do(req)
 		if err != nil {
 			return err
 		}
+		status := resp.StatusCode
 		b, rerr := providers.ReadBody(resp)
+		var he *providers.HTTPError
+		if rerr != nil && !errors.As(rerr, &he) {
+			return rerr
+		}
+		if he != nil {
+			b = []byte(he.Body)
+		}
 		var env struct {
 			Data  json.RawMessage `json:"data"`
 			Error apiError        `json:"error"`
 		}
-		var he *providers.HTTPError
-		if rerr != nil {
-			if errors.As(rerr, &he) {
-				_ = json.Unmarshal([]byte(he.Body), &env)
-				if attempt == 0 && (he.Status == 401 || env.Error.Code == "access_token_invalid") {
-					continue // refresh and retry once
-				}
-			}
-			return rerr
+		jerr := json.Unmarshal(b, &env)
+		code := env.Error.Code
+		if attempt == 0 && (status == 401 || code == "access_token_invalid") && c.creds["refresh_token"] != "" {
+			continue // refresh and retry once
 		}
-		if err := json.Unmarshal(b, &env); err != nil {
-			return err
-		}
-		if env.Error.Code != "" && env.Error.Code != "ok" {
-			if attempt == 0 && env.Error.Code == "access_token_invalid" {
-				continue
+		if he != nil {
+			if code != "" {
+				return &providers.HTTPError{Status: status, Body: fmt.Sprintf("%s: %s (log_id %s)", code, env.Error.Message, env.Error.LogID)}
 			}
-			return &providers.HTTPError{Status: 400, Body: env.Error.Code + ": " + env.Error.Message}
+			return he
+		}
+		if jerr != nil {
+			return jerr
+		}
+		if code != "" && code != "ok" {
+			return &providers.HTTPError{Status: statusFor(code, status), Body: fmt.Sprintf("%s: %s (log_id %s)", code, env.Error.Message, env.Error.LogID)}
 		}
 		if data != nil && len(env.Data) > 0 {
 			return json.Unmarshal(env.Data, data)
@@ -224,13 +306,22 @@ func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 			Username    string `json:"username"`
 		} `json:"user"`
 	}
-	if err := c.call(ctx, "GET", "/v2/user/info/?fields=open_id,display_name,username", nil, &r); err != nil {
+	// username needs user.info.profile; fall back to the basic fields when it was not granted.
+	err := c.call(ctx, "GET", "/v2/user/info/?fields=open_id,display_name,username", nil, &r)
+	var he *providers.HTTPError
+	if errors.As(err, &he) && strings.Contains(he.Body, "scope_not_authorized") {
+		err = c.call(ctx, "GET", "/v2/user/info/?fields=open_id,display_name", nil, &r)
+	}
+	if err != nil {
 		return nil, err
 	}
-	c.creds["username"] = r.User.Username
+	if r.User.Username != "" {
+		c.creds["username"] = r.User.Username
+	}
 	return &providers.Identity{RemoteUserID: r.User.OpenID, Handle: r.User.Username, Name: r.User.DisplayName}, nil
 }
 
+// AccountMetrics needs the user.info.stats scope.
 func (c *Client) AccountMetrics(ctx context.Context) (map[string]int64, error) {
 	var r struct {
 		User struct {
@@ -247,6 +338,8 @@ func (c *Client) AccountMetrics(ctx context.Context) (map[string]int64, error) {
 }
 
 type creatorInfo struct {
+	Username            string   `json:"creator_username"`
+	Nickname            string   `json:"creator_nickname"`
 	PrivacyLevelOptions []string `json:"privacy_level_options"`
 	CommentDisabled     bool     `json:"comment_disabled"`
 	DuetDisabled        bool     `json:"duet_disabled"`
@@ -254,33 +347,21 @@ type creatorInfo struct {
 	MaxVideoDuration    int      `json:"max_video_post_duration_sec"`
 }
 
-func pickPrivacy(want string, allowed []string) (string, error) {
-	if want != "" {
-		for _, a := range allowed {
-			if a == want {
-				return want, nil
-			}
-		}
-		return "", providers.Invalid(fmt.Sprintf("tiktok: privacy_level %s not allowed for this account (allowed: %s)", want, strings.Join(allowed, ", ")))
+// interaction returns the disable_* flag: off-by-default interactions (TikTok's UX rule) and always
+// disabled when the creator turned them off in the app.
+func interaction(o map[string]any, k string, creatorDisabled bool) bool {
+	if creatorDisabled {
+		return true
 	}
-	for _, pref := range []string{"PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"} {
-		for _, a := range allowed {
-			if a == pref {
-				return a, nil
-			}
-		}
-	}
-	if len(allowed) > 0 {
-		return allowed[0], nil
-	}
-	return "SELF_ONLY", nil
-}
-
-func boolOpt(o map[string]any, k string, def bool) bool {
 	if v, ok := o[k].(bool); ok {
 		return v
 	}
-	return def
+	return true
+}
+
+func boolOpt(o map[string]any, k string) bool {
+	v, _ := o[k].(bool)
+	return v
 }
 
 func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*providers.PublishResult, error) {
@@ -288,39 +369,46 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 		return nil, providers.Invalid(strings.Join(errs, "; "))
 	}
 	o := req.Options
-	if o == nil {
-		o = map[string]any{}
-	}
+	photo := isPhoto(req)
+	// TikTok requires fresh creator info before every post.
 	var ci creatorInfo
-	if err := c.call(ctx, "POST", "/v2/post/publish/creator_info/query/", map[string]any{}, &ci); err != nil {
+	if err := c.call(ctx, "POST", "/v2/post/publish/creator_info/query/", nil, &ci); err != nil {
 		return nil, err
 	}
-	want, _ := o["privacy_level"].(string)
-	privacy, err := pickPrivacy(want, ci.PrivacyLevelOptions)
-	if err != nil {
-		return nil, err
+	privacy, _ := o["privacy_level"].(string)
+	if !slices.Contains(ci.PrivacyLevelOptions, privacy) {
+		return nil, providers.Invalid(fmt.Sprintf("tiktok: privacy_level %s not allowed for @%s (allowed: %s)", privacy, ci.Username, strings.Join(ci.PrivacyLevelOptions, ", ")))
+	}
+	if d, ok := o["duration_sec"].(float64); ok && !photo && ci.MaxVideoDuration > 0 && int(d) > ci.MaxVideoDuration {
+		return nil, providers.Invalid(fmt.Sprintf("tiktok: video is %ds, @%s can post at most %ds", int(d), ci.Username, ci.MaxVideoDuration))
+	}
+	if ci.Username != "" && c.creds["username"] == "" {
+		c.creds["username"] = ci.Username
 	}
 	text := strings.Join(req.Parts, "\n\n")
 	postInfo := map[string]any{
-		"privacy_level":   privacy,
-		"disable_comment": boolOpt(o, "disable_comment", ci.CommentDisabled),
-	}
-	for _, k := range []string{"is_aigc", "brand_content_toggle", "brand_organic_toggle"} {
-		if v, ok := o[k].(bool); ok {
-			postInfo[k] = v
-		}
+		"privacy_level":        privacy,
+		"disable_comment":      interaction(o, "disable_comment", ci.CommentDisabled),
+		"brand_content_toggle": boolOpt(o, "brand_content_toggle"),
+		"brand_organic_toggle": boolOpt(o, "brand_organic_toggle"),
 	}
 	var publishID string
-	if strings.HasPrefix(req.Media[0].Mime, "video/") {
-		postInfo["title"] = text // for videos the "title" is the caption
-		postInfo["disable_duet"] = boolOpt(o, "disable_duet", ci.DuetDisabled)
-		postInfo["disable_stitch"] = boolOpt(o, "disable_stitch", ci.StitchDisabled)
+	var err error
+	if photo {
+		publishID, err = c.postPhotos(ctx, req.Media, text, o, postInfo)
+	} else {
+		if text != "" {
+			postInfo["title"] = text // for videos the "title" is the caption
+		}
+		postInfo["disable_duet"] = interaction(o, "disable_duet", ci.DuetDisabled)
+		postInfo["disable_stitch"] = interaction(o, "disable_stitch", ci.StitchDisabled)
+		if v, ok := o["is_aigc"].(bool); ok {
+			postInfo["is_aigc"] = v
+		}
 		if ms, ok := o["video_cover_timestamp_ms"].(float64); ok {
 			postInfo["video_cover_timestamp_ms"] = int64(ms)
 		}
 		publishID, err = c.uploadVideo(ctx, req.Media[0], postInfo)
-	} else {
-		publishID, err = c.postPhotos(ctx, req.Media, text, o, postInfo)
 	}
 	if err != nil {
 		return nil, err
@@ -331,22 +419,27 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 	}
 	res := &providers.PublishResult{RemoteID: id, RemoteIDs: []string{id}}
 	if id == "" {
-		// Private (SELF_ONLY) posts get no public id: keep the publish id so the post stays traceable.
+		// Private (SELF_ONLY) or not-yet-moderated posts get no public id: keep the publish id so the post stays traceable.
 		res.RemoteID, res.RemoteIDs = "publish:"+publishID, []string{"publish:" + publishID}
 	} else if u := c.creds["username"]; u != "" {
-		res.URL = "https://www.tiktok.com/@" + u + "/video/" + id
+		kind := "video"
+		if photo {
+			kind = "photo"
+		}
+		res.URL = "https://www.tiktok.com/@" + u + "/" + kind + "/" + id
 	}
 	return res, nil
 }
 
-// chunkPlan follows TikTok's rules: chunks of 5-64 MB, the last one may hold the remainder (up to 128 MB);
-// files under 64 MB go in one chunk.
-func chunkPlan(size int64) (chunkSize int64, count int64) {
-	if size <= maxChunk {
+// chunkPlan follows the Media Transfer Guide: total_chunk_count = floor(video_size / chunk_size),
+// every chunk is 5-64 MB except the last one, which absorbs the remainder (up to 128 MB);
+// files under 5 MB must go in a single chunk. Small files (<= 20 MiB) are sent whole; larger ones
+// use 10 MiB chunks, so the last chunk stays under 20 MiB and a 4 GB file needs 409 chunks (max 1000).
+func chunkPlan(size int64) (chunk int64, count int64) {
+	if size <= singleLimit {
 		return size, 1
 	}
-	count = size / chunk
-	return chunk, count
+	return chunkSize, size / chunkSize
 }
 
 func (c *Client) uploadVideo(ctx context.Context, m providers.MediaFile, postInfo map[string]any) (string, error) {
@@ -362,11 +455,15 @@ func (c *Client) uploadVideo(ctx context.Context, m providers.MediaFile, postInf
 	if err := c.call(ctx, "POST", "/v2/post/publish/video/init/", body, &init); err != nil {
 		return "", err
 	}
+	if init.UploadURL == "" {
+		return "", errors.New("tiktok: video init returned no upload_url")
+	}
 	f, err := m.Open()
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	mime := strings.ToLower(m.Mime)
 	var off int64
 	for i := int64(0); i < n; i++ {
 		length := cs
@@ -381,10 +478,6 @@ func (c *Client) uploadVideo(ctx context.Context, m providers.MediaFile, postInf
 		if err != nil {
 			return "", err
 		}
-		mime := m.Mime
-		if mime == "" {
-			mime = "video/mp4"
-		}
 		req.Header.Set("Content-Type", mime)
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", off, off+length-1, m.Size))
 		req.ContentLength = length
@@ -392,6 +485,7 @@ func (c *Client) uploadVideo(ctx context.Context, m providers.MediaFile, postInf
 		if err != nil {
 			return "", err
 		}
+		// 206: chunk received, more expected; 201: upload complete.
 		if _, err := providers.ReadBody(resp); err != nil {
 			return "", fmt.Errorf("tiktok: upload chunk %d/%d: %w", i+1, n, err)
 		}
@@ -403,8 +497,8 @@ func (c *Client) uploadVideo(ctx context.Context, m providers.MediaFile, postInf
 func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, text string, o map[string]any, postInfo map[string]any) (string, error) {
 	var urls []string
 	for _, m := range media {
-		if m.PublicURL == "" {
-			return "", providers.Invalid("tiktok: photo posts need RELAY_BASE_URL (TikTok pulls images from a verified domain)")
+		if !strings.HasPrefix(m.PublicURL, "https://") {
+			return "", providers.Invalid("tiktok: photo posts need an https RELAY_BASE_URL on a domain verified in your TikTok app (TikTok pulls the images)")
 		}
 		urls = append(urls, m.PublicURL)
 	}
@@ -412,12 +506,19 @@ func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, te
 	if title == "" {
 		title = firstLine(text, 90)
 	}
-	postInfo["title"] = title
-	postInfo["description"] = text
-	postInfo["auto_add_music"] = boolOpt(o, "auto_add_music", true)
+	if title != "" {
+		postInfo["title"] = title
+	}
+	if text != "" {
+		postInfo["description"] = text
+	}
+	postInfo["auto_add_music"] = boolOpt(o, "auto_add_music")
 	cover := 0
 	if v, ok := o["photo_cover_index"].(float64); ok {
 		cover = int(v)
+	}
+	if cover < 0 || cover >= len(urls) {
+		return "", providers.Invalid("tiktok: photo_cover_index out of range")
 	}
 	var r struct {
 		PublishID string `json:"publish_id"`
@@ -428,33 +529,43 @@ func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, te
 		"post_mode":   "DIRECT_POST",
 		"media_type":  "PHOTO",
 	}
+	if v, ok := o["is_aigc"].(bool); ok {
+		body["is_aigc"] = v // top-level for photos, unlike videos
+	}
 	if err := c.call(ctx, "POST", "/v2/post/publish/content/init/", body, &r); err != nil {
 		return "", err
 	}
 	return r.PublishID, nil
 }
 
+// firstLine returns the first line of s cut to max UTF-16 code units.
 func firstLine(s string, max int) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	r := []rune(s)
-	if len(r) > max {
-		r = r[:max]
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		w := utf16.RuneLen(r)
+		if n+w > max {
+			break
+		}
+		n += w
+		b.WriteRune(r)
 	}
-	return string(r)
+	return b.String()
 }
 
 func (c *Client) waitPublished(ctx context.Context, publishID string) (string, error) {
 	wait := c.PollInterval
 	if wait <= 0 {
-		wait = 5 * time.Second
+		wait = 5 * time.Second // status/fetch allows 30 requests per minute
 	}
 	for i := 0; i < 180; i++ {
 		var st struct {
-			Status     string   `json:"status"`
-			FailReason string   `json:"fail_reason"`
-			PostIDs    []string `json:"publicaly_available_post_id"` // sic, TikTok's spelling
+			Status     string        `json:"status"`
+			FailReason string        `json:"fail_reason"`
+			PostIDs    []json.Number `json:"publicaly_available_post_id"` // sic, TikTok's spelling; list<int64>
 		}
 		if err := c.call(ctx, "POST", "/v2/post/publish/status/fetch/", map[string]string{"publish_id": publishID}, &st); err != nil {
 			return "", err
@@ -462,7 +573,7 @@ func (c *Client) waitPublished(ctx context.Context, publishID string) (string, e
 		switch st.Status {
 		case "PUBLISH_COMPLETE":
 			if len(st.PostIDs) > 0 {
-				return st.PostIDs[0], nil
+				return st.PostIDs[0].String(), nil
 			}
 			return "", nil
 		case "FAILED":
@@ -476,7 +587,7 @@ func (c *Client) waitPublished(ctx context.Context, publishID string) (string, e
 		case <-time.After(wait):
 		}
 	}
-	return "", errors.New("tiktok: publishing still processing after 15 minutes (publish_id " + publishID + ")")
+	return "", errors.New("tiktok: publishing still processing after 180 status checks (publish_id " + publishID + ")")
 }
 
 type video struct {
@@ -497,6 +608,7 @@ func (v video) metrics() map[string]int64 {
 	return map[string]int64{"view_count": v.ViewCount, "like_count": v.LikeCount, "comment_count": v.CommentCount, "share_count": v.ShareCount}
 }
 
+// Metrics queries /v2/video/query/ (20 ids per request, video.list scope). Publish-only ids are skipped.
 func (c *Client) Metrics(ctx context.Context, ids []string) (map[string]map[string]int64, error) {
 	out := map[string]map[string]int64{}
 	var real []string
@@ -520,6 +632,7 @@ func (c *Client) Metrics(ctx context.Context, ids []string) (map[string]map[stri
 	return out, nil
 }
 
+// Comments: TikTok has no comments API for creators (the Research API is for academic use only).
 func (c *Client) Comments(ctx context.Context, remoteID string) ([]providers.Comment, error) {
 	return nil, providers.ErrUnsupported
 }
@@ -528,6 +641,7 @@ func (c *Client) Reply(ctx context.Context, to, text string) (*providers.Publish
 	return nil, providers.ErrUnsupported
 }
 
+// History pages /v2/video/list/ (newest first, 20 per page, cursor in ms).
 func (c *Client) History(ctx context.Context, since time.Time, max int) ([]providers.HistoryItem, error) {
 	if max <= 0 {
 		max = 5000
@@ -558,9 +672,9 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 			if text == "" {
 				text = v.Title
 			}
-			out = append(out, providers.HistoryItem{RemoteID: v.ID, Text: text, URL: v.ShareURL, CreatedAt: t, Metrics: v.metrics()})
+			out = append(out, providers.HistoryItem{RemoteID: v.ID, Text: text, URL: v.ShareURL, CreatedAt: t, Metrics: v.metrics(), Kind: "video"})
 		}
-		if stop || !r.HasMore || len(r.Videos) == 0 {
+		if stop || !r.HasMore || len(r.Videos) == 0 || r.Cursor == cursor {
 			break
 		}
 		cursor = r.Cursor
