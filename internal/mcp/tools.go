@@ -14,7 +14,9 @@ type Tool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
-	handler     func(ctx context.Context, args json.RawMessage) (any, error)
+	// Admin tools are hidden from and refused to drafter keys.
+	Admin   bool `json:"-"`
+	handler func(ctx context.Context, args json.RawMessage) (any, error)
 }
 
 func obj(props map[string]any, required ...string) map[string]any {
@@ -82,6 +84,7 @@ func BuildTools(svc *core.Service) []Tool {
 		},
 		{
 			Name:        "connect_account",
+			Admin:       true,
 			Description: "Connect a new account. Credentials are verified against the network, then stored encrypted.",
 			InputSchema: obj(map[string]any{
 				"provider":    str("Network name from list_providers, e.g. x, website, facebook, instagram"),
@@ -120,6 +123,9 @@ func BuildTools(svc *core.Service) []Tool {
 				in, err := decode[core.ScheduleInput](raw)
 				if err != nil {
 					return nil, err
+				}
+				if RoleFrom(ctx) == RoleDrafter {
+					in.ScheduledAt = "draft" // drafters stage, humans approve
 				}
 				return svc.Schedule(ctx, in)
 			},
@@ -189,11 +195,21 @@ func BuildTools(svc *core.Service) []Tool {
 				if err != nil {
 					return nil, err
 				}
+				if RoleFrom(ctx) == RoleDrafter {
+					p, err := svc.Store.GetPost(ctx, a.ID)
+					if err != nil {
+						return nil, err
+					}
+					if p.Status != store.StatusDraft || (a.ScheduledAt != nil && *a.ScheduledAt != "draft") {
+						return nil, ErrForbidden
+					}
+				}
 				return svc.UpdatePost(ctx, a.ID, a.UpdateInput)
 			},
 		},
 		{
 			Name:        "delete_post",
+			Admin:       true,
 			Description: "Delete a post from Relay (does not delete it from the network).",
 			InputSchema: obj(map[string]any{"id": str("Post id")}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -206,6 +222,7 @@ func BuildTools(svc *core.Service) []Tool {
 		},
 		{
 			Name:        "publish_now",
+			Admin:       true,
 			Description: "Publish a draft or scheduled post immediately and return the result.",
 			InputSchema: obj(map[string]any{"id": str("Post id")}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -249,28 +266,144 @@ func BuildTools(svc *core.Service) []Tool {
 			},
 		},
 		{
-			Name:        "get_stats",
-			Description: "Summarise metrics over published posts: totals per account and top posts by a metric (default like_count).",
-			InputSchema: obj(map[string]any{"account_id": str(""), "since": str("RFC3339 or duration, default 720h"), "metric": str("like_count, impression_count, reply_count..."), "top": num("default 10")}),
+			Name: "analyze",
+			Description: "Analyse performance across all networks with normalized metrics (views, likes, comments, shares, saves, engagement, engagement_rate). " +
+				"Returns totals vs the previous period of the same length, top and bottom posts, and optional groups. " +
+				"group_by: network, account, day, week, month, weekday, hour, format (text/thread/reply/image/video/carousel/article), length, hashtag, has_link. " +
+				"Use it to find what works: best hours, best formats, best networks. Reposts are excluded by default.",
+			InputSchema: obj(map[string]any{
+				"since": str("RFC3339 or duration like 720h (default 30 days)"), "until": str("RFC3339, default now"),
+				"account_id": str(""), "provider": str("x, tiktok, youtube, instagram, facebook, website"),
+				"group_by": str("see description"), "metric": str("views | likes | comments | shares | saves | engagement | engagement_rate | any raw key; default engagement"),
+				"top": num("top/bottom posts to return, default 5"), "include_reposts": map[string]any{"type": "boolean"},
+			}),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct {
-					AccountID string `json:"account_id"`
-					Since     string `json:"since"`
-					Metric    string `json:"metric"`
-					Top       int    `json:"top"`
+					Since          string `json:"since"`
+					Until          string `json:"until"`
+					AccountID      string `json:"account_id"`
+					Provider       string `json:"provider"`
+					GroupBy        string `json:"group_by"`
+					Metric         string `json:"metric"`
+					Top            int    `json:"top"`
+					IncludeReposts bool   `json:"include_reposts"`
 				}](raw)
 				if err != nil {
 					return nil, err
 				}
 				since, err := parseSince(a.Since, 30*24*time.Hour)
 				if err != nil {
-					return nil, err
+					return nil, &core.ErrInvalid{Msg: "since: " + err.Error()}
 				}
-				posts, err := svc.Store.ListPosts(ctx, store.PostFilter{Status: store.StatusPublished, AccountID: a.AccountID, From: &since, Limit: 1000})
+				in := core.AnalyzeInput{Since: since, AccountID: a.AccountID, Provider: a.Provider, GroupBy: a.GroupBy, Metric: a.Metric, Top: a.Top, IncludeReposts: a.IncludeReposts, Location: svc.Location}
+				if a.Until != "" {
+					if in.Until, err = time.Parse(time.RFC3339, a.Until); err != nil {
+						return nil, &core.ErrInvalid{Msg: "until: " + err.Error()}
+					}
+				}
+				return svc.Analyze(ctx, in)
+			},
+		},
+		{
+			Name:        "post_timeline",
+			Description: "Growth curve of one post: every metrics snapshot with its age, plus normalized metrics at 1h, 24h, 7d and 30d.",
+			InputSchema: obj(map[string]any{"id": str("Post id")}, "id"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct{ ID string }](raw)
 				if err != nil {
 					return nil, err
 				}
-				return core.Summarize(posts, a.Metric, a.Top), nil
+				return svc.PostTimeline(ctx, a.ID)
+			},
+		},
+		{
+			Name:        "account_growth",
+			Description: "Followers / following / post counts over time per account (snapshots every 6h), with the change and the daily rate. Set refresh=true to take a snapshot now.",
+			InputSchema: obj(map[string]any{"account_id": str("Optional"), "since": str("RFC3339 or duration, default 720h"), "points": map[string]any{"type": "boolean", "description": "include every snapshot"}, "refresh": map[string]any{"type": "boolean"}}),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					AccountID string `json:"account_id"`
+					Since     string `json:"since"`
+					Points    bool   `json:"points"`
+					Refresh   bool   `json:"refresh"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				since, err := parseSince(a.Since, 30*24*time.Hour)
+				if err != nil {
+					return nil, &core.ErrInvalid{Msg: "since: " + err.Error()}
+				}
+				if a.Refresh {
+					accs, err := svc.Store.ListAccounts(ctx)
+					if err != nil {
+						return nil, err
+					}
+					for _, acc := range accs {
+						if a.AccountID == "" || acc.ID == a.AccountID {
+							_, _ = svc.SnapshotAccount(ctx, acc)
+						}
+					}
+				}
+				return svc.AccountGrowth(ctx, a.AccountID, since, a.Points)
+			},
+		},
+		{
+			Name:        "sql_query",
+			Description: "Run one read-only SQL query (SQLite) on Relay's data for analyses the other tools do not cover. Max 1000 rows. Schema:\n" + store.Schema,
+			InputSchema: obj(map[string]any{"query": str("SELECT ... or WITH ..."), "max_rows": num("default 200")}, "query"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					Query   string `json:"query"`
+					MaxRows int    `json:"max_rows"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				res, err := svc.Store.Query(ctx, a.Query, a.MaxRows)
+				if err != nil {
+					return nil, &core.ErrInvalid{Msg: err.Error()}
+				}
+				return res, nil
+			},
+		},
+		{
+			Name:        "validate_post",
+			Description: "Pre-flight check of a post against each target network (character limits with X link weighting, media count and types, required title...). Same arguments as schedule_post; nothing is saved.",
+			InputSchema: obj(map[string]any{"account_ids": strs(""), "text": str(""), "thread": strs(""), "media": strs(""), "per_account": map[string]any{"type": "object"}, "options": map[string]any{"type": "object"}}, "account_ids"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				in, err := decode[core.ScheduleInput](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.Validate(ctx, in)
+			},
+		},
+		{
+			Name:        "approve_post",
+			Admin:       true,
+			Description: "Approve a draft: schedule it at scheduled_at (RFC3339) or publish within one tick when omitted. Use it to release drafts staged by a drafter key.",
+			InputSchema: obj(map[string]any{"id": str("Post id"), "scheduled_at": str("RFC3339 or 'now'")}, "id"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					ID          string `json:"id"`
+					ScheduledAt string `json:"scheduled_at"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				p, err := svc.Store.GetPost(ctx, a.ID)
+				if err != nil {
+					return nil, err
+				}
+				if p.Status != store.StatusDraft {
+					return nil, &core.ErrInvalid{Msg: "post is " + p.Status + ", not a draft"}
+				}
+				at := a.ScheduledAt
+				if at == "" {
+					at = "now"
+				}
+				return svc.UpdatePost(ctx, a.ID, core.UpdateInput{ScheduledAt: &at})
 			},
 		},
 		{
@@ -298,6 +431,7 @@ func BuildTools(svc *core.Service) []Tool {
 		},
 		{
 			Name:        "reply_comment",
+			Admin:       true,
 			Description: "Reply publicly to a comment (or to any post) on the network. Use the comment's remote_id and account_id from list_comments.",
 			InputSchema: obj(map[string]any{"account_id": str(""), "remote_id": str("Remote id of the comment or post to answer"), "text": str("")}, "account_id", "remote_id", "text"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -337,6 +471,7 @@ func BuildTools(svc *core.Service) []Tool {
 		},
 		{
 			Name:        "create_browser_task",
+			Admin:       true,
 			Description: "Queue a task for the browser agent running on the owner's computer (for networks without a usable API: TikTok comments, LinkedIn stats...). kind examples: tiktok.comments, linkedin.metrics, linkedin.reply.",
 			InputSchema: obj(map[string]any{"account_id": str(""), "kind": str(""), "payload": map[string]any{"type": "object"}}, "kind"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {

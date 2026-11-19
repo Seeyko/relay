@@ -246,7 +246,7 @@ func TestEndToEndX(t *testing.T) {
 	if isErr || !strings.Contains(text, `"updated": 1`) {
 		t.Fatalf("metrics: %s", text)
 	}
-	code, stats, raw := e.req("GET", "/v1/stats", nil)
+	code, stats, raw := e.req("GET", "/v1/analytics?group_by=format", nil)
 	if code != 200 || stats["posts"].(float64) != 1 {
 		t.Fatalf("stats: %s", raw)
 	}

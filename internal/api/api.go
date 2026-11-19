@@ -18,11 +18,13 @@ import (
 )
 
 type API struct {
-	Svc     *core.Service
-	MCP     *mcp.Server
-	Token   string
-	Log     *slog.Logger
-	Version string
+	Svc   *core.Service
+	MCP   *mcp.Server
+	Token string
+	// DraftToken (optional) gives a key that can only stage drafts: hand it to sub-agents.
+	DraftToken string
+	Log        *slog.Logger
+	Version    string
 }
 
 func (a *API) Handler() http.Handler {
@@ -72,7 +74,12 @@ func (a *API) Handler() http.Handler {
 	authed.HandleFunc("GET /v1/comments", a.tool("list_comments", nil))
 	authed.HandleFunc("POST /v1/comments/reply", a.tool("reply_comment", nil))
 	authed.HandleFunc("POST /v1/metrics/refresh", a.tool("refresh_metrics", nil))
-	authed.HandleFunc("GET /v1/stats", a.tool("get_stats", nil))
+	authed.HandleFunc("GET /v1/analytics", a.tool("analyze", nil))
+	authed.HandleFunc("GET /v1/posts/{id}/timeline", a.tool("post_timeline", map[string]string{"id": "id"}))
+	authed.HandleFunc("POST /v1/posts/{id}/approve", a.tool("approve_post", map[string]string{"id": "id"}))
+	authed.HandleFunc("POST /v1/posts/validate", a.tool("validate_post", nil))
+	authed.HandleFunc("GET /v1/accounts/growth", a.tool("account_growth", nil))
+	authed.HandleFunc("POST /v1/query", a.tool("sql_query", nil))
 
 	authed.HandleFunc("GET /v1/media", func(w http.ResponseWriter, r *http.Request) {
 		ms, err := a.Svc.Store.ListMedia(r.Context())
@@ -122,13 +129,35 @@ func (a *API) Handler() http.Handler {
 func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if a.Token == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(a.Token)) != 1 {
+		var role mcp.Role
+		switch {
+		case a.Token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.Token)) == 1:
+			role = mcp.RoleAdmin
+		case a.DraftToken != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.DraftToken)) == 1:
+			role = mcp.RoleDrafter
+		default:
 			w.Header().Set("WWW-Authenticate", `Bearer realm="relay"`)
 			writeJSON(w, 401, map[string]string{"error": "unauthorized"})
 			return
 		}
-		next.ServeHTTP(w, r)
+		if role != mcp.RoleAdmin && !drafterRoute(r) {
+			writeJSON(w, 403, map[string]string{"error": mcp.ErrForbidden.Error()})
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(mcp.WithRole(r.Context(), role)))
 	})
+}
+
+// drafterRoute lists the non-tool routes a drafter key may use; tool routes are checked per tool.
+func drafterRoute(r *http.Request) bool {
+	p := r.URL.Path
+	switch {
+	case strings.HasPrefix(p, "/v1/accounts/") && r.Method == "DELETE":
+		return false
+	case strings.HasPrefix(p, "/v1/agent/tasks/"): // claim / result are for the browser agent
+		return false
+	}
+	return true
 }
 
 type statusWriter struct {
@@ -199,6 +228,8 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeJSON(w, 404, map[string]string{"error": "not found"})
+	case errors.Is(err, mcp.ErrForbidden):
+		writeJSON(w, 403, map[string]string{"error": err.Error()})
 	case errors.Is(err, mcp.ErrUnknownTool):
 		writeJSON(w, 404, map[string]string{"error": err.Error()})
 	case errors.As(err, &inv):

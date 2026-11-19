@@ -48,6 +48,9 @@ func (s *Server) Call(ctx context.Context, name string, args json.RawMessage) (a
 	if !ok {
 		return nil, ErrUnknownTool
 	}
+	if t.Admin && RoleFrom(ctx) != RoleAdmin {
+		return nil, ErrForbidden
+	}
 	res, err := t.handler(ctx, args)
 	if isNil(res) {
 		res = nil
@@ -163,7 +166,13 @@ func (s *Server) handle(ctx context.Context, req rpcReq) rpcResp {
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
-		resp.Result = map[string]any{"tools": s.tools}
+		visible := []Tool{}
+		for _, t := range s.tools {
+			if !t.Admin || RoleFrom(ctx) == RoleAdmin {
+				visible = append(visible, t)
+			}
+		}
+		resp.Result = map[string]any{"tools": visible}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`

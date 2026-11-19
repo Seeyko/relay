@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	// connectors register themselves
 	_ "github.com/Seeyko/relay/internal/providers/meta"
+	_ "github.com/Seeyko/relay/internal/providers/tiktok"
 	_ "github.com/Seeyko/relay/internal/providers/website"
 	_ "github.com/Seeyko/relay/internal/providers/x"
 )
@@ -90,6 +92,14 @@ func run(log *slog.Logger) error {
 		WebhookURL:    os.Getenv("RELAY_WEBHOOK_URL"),
 		WebhookSecret: os.Getenv("RELAY_WEBHOOK_SECRET"),
 		Log:           log,
+		Location:      time.UTC,
+	}
+	if tz := os.Getenv("RELAY_TIMEZONE"); tz != "" {
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			return fmt.Errorf("RELAY_TIMEZONE: %w", err)
+		}
+		svc.Location = loc
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -99,13 +109,17 @@ func run(log *slog.Logger) error {
 
 	server := mcp.NewServer("relay", version, mcp.BuildTools(svc))
 	server.ExtraInstructions = os.Getenv("RELAY_AGENT_INSTRUCTIONS")
-	a := &api.API{Svc: svc, MCP: server, Token: token, Log: log, Version: version}
+	draft := os.Getenv("RELAY_DRAFT_TOKEN")
+	if draft != "" && (len(draft) < 16 || draft == token) {
+		return errors.New("RELAY_DRAFT_TOKEN must be at least 16 characters and differ from RELAY_API_TOKEN")
+	}
+	a := &api.API{Svc: svc, MCP: server, Token: token, DraftToken: draft, Log: log, Version: version}
 	srv := &http.Server{Addr: env("RELAY_ADDR", ":8080"), Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
 	sched := &core.Scheduler{
 		Svc:          svc,
 		Tick:         dur("RELAY_TICK", 30*time.Second, log),
-		CollectEvery: dur("RELAY_COLLECT_INTERVAL", 6*time.Hour, log),
+		CollectEvery: dur("RELAY_COLLECT_INTERVAL", time.Hour, log),
 	}
 	go sched.Run(ctx)
 

@@ -34,6 +34,7 @@ type Service struct {
 	WebhookURL    string
 	WebhookSecret string
 	MaxAttempts   int
+	Location      *time.Location // owner's timezone, used to group analytics by day/hour
 	Log           *slog.Logger
 	Now           func() time.Time
 }
