@@ -1308,3 +1308,20 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 	}
 	return out, nil
 }
+
+// Delete removes the post (DELETE /rest/posts/{urn}). The other parts of a thread are comments of the
+// page on that post: LinkedIn removes them with it.
+// https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api#delete-posts
+func (c *Client) Delete(ctx context.Context, remoteIDs []string) error {
+	if len(remoteIDs) == 0 {
+		return nil
+	}
+	urn := remoteIDs[0]
+	if _, err := c.call(ctx, "DELETE", "/rest/posts/"+enc(urn), "", nil, nil, map[string]string{"X-RestLi-Method": "DELETE"}); err != nil {
+		if providers.NotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("linkedin-page: delete post %s: %w", urn, err)
+	}
+	return nil
+}

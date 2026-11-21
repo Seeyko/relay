@@ -302,16 +302,21 @@ func BuildTools(svc *core.Service) []Tool {
 			},
 		},
 		{
-			Name:        "delete_post",
-			Admin:       true,
-			Description: "Delete a post from Relay (does not delete it from the network).",
-			InputSchema: obj(map[string]any{"id": str("Post id")}, "id"),
+			Name:  "delete_post",
+			Admin: true,
+			Description: "Delete a post from Relay. By default the published post stays on the network. With remote=true, Relay first deletes it " +
+				"from the network, with every part of its thread (X, Threads, Facebook, LinkedIn); the Relay copy is kept if the network refuses, " +
+				"and the call can be repeated. Ask the user before using remote=true: it cannot be undone.",
+			InputSchema: obj(map[string]any{"id": str("Post id"), "remote": map[string]any{"type": "boolean", "description": "Also delete the published post from the network (default false)"}}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
-				a, err := decode[struct{ ID string }](raw)
+				a, err := decode[struct {
+					ID     string `json:"id"`
+					Remote bool   `json:"remote"`
+				}](raw)
 				if err != nil {
 					return nil, err
 				}
-				return map[string]bool{"deleted": true}, svc.Store.DeletePost(ctx, a.ID)
+				return svc.DeletePost(ctx, a.ID, a.Remote)
 			},
 		},
 		{

@@ -848,3 +848,25 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 type idResp struct {
 	ID string `json:"id"`
 }
+
+// Delete removes the posts of a thread, last reply first (DELETE /{threads-media-id}, needs the
+// threads_delete permission).
+// https://developers.facebook.com/docs/threads/posts/delete-posts
+func (c *Client) Delete(ctx context.Context, remoteIDs []string) error {
+	for i := len(remoteIDs) - 1; i >= 0; i-- {
+		id := remoteIDs[i]
+		var r struct {
+			Success bool `json:"success"`
+		}
+		if err := c.api.del(ctx, "/"+url.PathEscape(id), &r); err != nil {
+			if gone(err) {
+				continue
+			}
+			return fmt.Errorf("threads: delete post %s: %w", id, err)
+		}
+		if !r.Success {
+			return fmt.Errorf("threads: post %s not deleted", id)
+		}
+	}
+	return nil
+}

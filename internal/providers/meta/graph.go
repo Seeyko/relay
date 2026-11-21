@@ -204,3 +204,27 @@ type idResp struct {
 	ID     string `json:"id"`
 	PostID string `json:"post_id"`
 }
+
+func (g *graph) del(ctx context.Context, path string, out any) error {
+	q := url.Values{"access_token": {g.Token}}
+	req, err := http.NewRequestWithContext(ctx, "DELETE", g.Base+path+"?"+q.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	return g.send(req, out)
+}
+
+// gone says whether a Graph error means the object does not exist (any more): HTTP 404, or code 100
+// with subcode 33 ("Object with ID ... does not exist").
+func gone(err error) bool {
+	if providers.NotFound(err) {
+		return true
+	}
+	var he *providers.HTTPError
+	if !errors.As(err, &he) {
+		return false
+	}
+	var ge graphErrBody
+	_ = json.Unmarshal([]byte(he.Body), &ge)
+	return ge.Error.Code == 100 && ge.Error.Subcode == 33
+}
