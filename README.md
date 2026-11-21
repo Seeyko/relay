@@ -21,6 +21,7 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 | Provider | Publish | Metrics | Comments | Credentials |
 | --- | --- | --- | --- | --- |
 | `x` | text, threads, images, videos | public + impressions (< 30 days) | read + reply | OAuth 1.0a user keys |
+| `linkedin-page` | text, link/article, image, multi-image (2-20), video, document (PDF...); extra thread parts as comments | impressions, unique impressions, clicks, likes, comments, shares (organic, 12 months) + followers | read + reply | `organization_id`, `access_token`, `refresh_token`, `client_id`, `client_secret` |
 | `facebook` | text, link, photos, video, Reels (Pages) | reactions, comments, shares | read + reply | `page_id`, `page_access_token` |
 | `instagram` | image, carousel (up to 20), Reels, stories | likes, comments, views, reach, saves, shares | read + reply | `access_token` (Instagram Login, auto-refreshed) |
 | `threads` | text (500), image, video, carousel (2-20), threads (reply chains), replies, quotes, link attachment | views, likes, replies, reposts, quotes, shares; followers | read + reply | `access_token` (long-lived, auto-refreshed), optional `user_id` |
@@ -29,7 +30,8 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 | `website` | Markdown articles | if the site supports it | if the site supports it | `base_url`, `token` |
 
 TikTok requires `options.privacy_level` on every post (one of the values the creator's account allows), and
-unaudited TikTok apps can only post privately. Meta connectors use Graph API v26.0; Threads uses the Threads API v1.0. Contributions for other
+unaudited TikTok apps can only post privately. Meta connectors use Graph API v26.0; Threads uses the Threads API v1.0. The LinkedIn connector posts as a company page with Community
+Management API scopes and sends `LinkedIn-Version: 202611` (override with the `api_version` credential). Contributions for other
 networks are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 You create your own developer apps on each network (X Developer Portal, Meta for Developers...) and give Relay
@@ -166,7 +168,7 @@ curl -X POST https://<your-host>/v1/posts \
 go test ./...
 ```
 
-Tests replay X, Facebook, Instagram, Threads, YouTube, TikTok and the site protocol against fake HTTP servers, so they need no network
+Tests replay X, Facebook, Instagram, Threads, LinkedIn, YouTube, TikTok and the site protocol against fake HTTP servers, so they need no network
 or credentials.
 
 ## License
