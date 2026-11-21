@@ -506,3 +506,45 @@ func TestFirstLineUTF16(t *testing.T) {
 		t.Errorf("got %d runes", len([]rune(got)))
 	}
 }
+
+func TestPublishInbox(t *testing.T) {
+	// posting_mode=inbox: no creator_info, no privacy, the media lands in the creator's TikTok inbox.
+	f := newFake(t)
+	f.on("POST /v2/post/publish/content/init/", ok(`{"publish_id":"p_ph"}`))
+	f.on("POST /v2/post/publish/inbox/video/init/", func(w http.ResponseWriter, h hit) {
+		ok(`{"publish_id":"p_vid","upload_url":"`+f.srv.URL+`/upload"}`)(w, h)
+	})
+	f.on("PUT /upload", func(w http.ResponseWriter, h hit) { w.WriteHeader(201) })
+	f.on("POST /v2/post/publish/status/fetch/", ok(`{"status":"SEND_TO_USER_INBOX"}`))
+	c, _ := newClient(t, f, nil)
+
+	ph := photoReq()
+	ph.Options = map[string]any{"media_type": "PHOTO", "posting_mode": "inbox", "title": "T", "auto_add_music": true}
+	res, err := c.Publish(context.Background(), ph)
+	if err != nil || res.RemoteID != "inbox:p_ph" || res.URL != "" {
+		t.Fatalf("photo %v %+v", err, res)
+	}
+	body := jsonOf(t, f.find("POST /v2/post/publish/content/init/")[0].Body)
+	pi := body["post_info"].(map[string]any)
+	if body["post_mode"] != "MEDIA_UPLOAD" || pi["privacy_level"] != nil || pi["auto_add_music"] != nil || pi["title"] != "T" {
+		t.Errorf("photo body %v", body)
+	}
+
+	res, err = c.Publish(context.Background(), videoReq(10, map[string]any{"posting_mode": "inbox"}))
+	if err != nil || res.RemoteID != "inbox:p_vid" {
+		t.Fatalf("video %v %+v", err, res)
+	}
+	vb := jsonOf(t, f.find("POST /v2/post/publish/inbox/video/init/")[0].Body)
+	if vb["post_info"] != nil || vb["source_info"] == nil {
+		t.Errorf("video body %v", vb)
+	}
+	if len(f.find("POST /v2/post/publish/creator_info/query/")) != 0 || len(f.find("POST /v2/post/publish/video/init/")) != 0 {
+		t.Error("inbox mode must not use direct posting")
+	}
+	if errs := validate(videoReq(10, map[string]any{"posting_mode": "inbox"})); len(errs) != 0 {
+		t.Errorf("inbox needs no privacy_level: %v", errs)
+	}
+	if errs := validate(videoReq(10, map[string]any{"posting_mode": "draft"})); len(errs) == 0 {
+		t.Error("unknown posting_mode accepted")
+	}
+}
