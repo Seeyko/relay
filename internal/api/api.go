@@ -171,8 +171,18 @@ func (a *API) Handler() http.Handler {
 			a.fail(w, err)
 			return
 		}
-		writeJSON(w, 200, ms)
+		type listed struct {
+			*store.Media
+			URL string `json:"url"` // public link, no login needed
+		}
+		out := make([]listed, len(ms))
+		for i, m := range ms {
+			out[i] = listed{m, a.Svc.ShareURL(m)}
+		}
+		writeJSON(w, 200, out)
 	})
+	authed.HandleFunc("GET /v1/media/{id}", a.tool("get_media", map[string]string{"id": "ids"}))
+	authed.HandleFunc("GET /v1/posts/{id}/media", a.tool("get_media", map[string]string{"id": "post"}))
 	authed.HandleFunc("POST /v1/media", a.uploadMedia)
 
 	// Feedback: agents ask for missing capabilities, maintainer agents turn them into PRs.

@@ -235,7 +235,7 @@ claude mcp add --transport http relay https://<your-host>/mcp --header "Authoriz
 Tools:
 
 - Accounts: `list_providers`, `list_accounts`, `connect_account`, `import_history`, `set_account_avatar`
-- Posts: `validate_post`, `schedule_post`, `list_posts`, `get_post`, `update_post`, `approve_post`, `delete_post`, `publish_now`, `upload_media_from_url`
+- Posts: `validate_post`, `schedule_post`, `list_posts`, `get_post`, `update_post`, `approve_post`, `delete_post`, `publish_now`, `upload_media_from_url`, `get_media` (public links of media, or of every media of a post, to show them to a person)
 - Deleting: `delete_post` removes the post from Relay only. `delete_post` with `remote: true` (REST:
   `DELETE /v1/posts/{id}?remote=true`) first deletes the published post from the network, with every part of its
   thread: X and Threads delete each reply, last first; Facebook and LinkedIn delete the post, which removes the
@@ -381,7 +381,9 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | PATCH / DELETE | `/v1/members/{id}` | `update_member` / `remove_member` (an `inv_` id revokes the invitation) |
 | POST | `/v1/posts/validate` | `validate_post` |
 | POST | `/v1/posts/{id}/approve` | `approve_post` |
-| GET / POST | `/v1/media` | list / upload (multipart `file` or JSON `{"url"}`) |
+| GET / POST | `/v1/media` | list (each with its public `url`) / upload (multipart `file` or JSON `{"url"}`) |
+| GET | `/v1/media/{id}` | `get_media` (metadata and public `url`; comma-separated ids work) |
+| GET | `/v1/posts/{id}/media` | `get_media` with `post`: the post's media in publishing order |
 | GET / POST | `/v1/agent/tasks` | `list_browser_tasks` / `create_browser_task` |
 | POST | `/v1/agent/tasks/claim`, `/v1/agent/tasks/{id}/result` | used by the browser agent |
 | POST | `/v1/feedback` | `submit_feedback` |
