@@ -172,7 +172,7 @@ func YouTube() *Network {
 func TikTok() *Network {
 	return &Network{
 		Slug: "tiktok", Label: "TikTok", Connector: "tiktok",
-		Scopes:  []string{"user.info.basic", "user.info.profile", "user.info.stats", "video.publish", "video.list"},
+		Scopes:  []string{"user.info.basic", "user.info.profile", "user.info.stats", "video.publish", "video.upload", "video.list"},
 		AuthURL: "https://www.tiktok.com/v2/auth/authorize/", TokenURL: "https://open.tiktokapis.com/v2/oauth/token/",
 		Console:     "TikTok for Developers > your app > Login Kit: Redirect URI (Web)",
 		clientParam: "client_key",
