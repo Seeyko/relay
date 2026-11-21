@@ -18,6 +18,7 @@ import (
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/oauth"
 	"github.com/Seeyko/relay/internal/store"
+	"github.com/Seeyko/relay/internal/team"
 	"github.com/Seeyko/relay/internal/ui"
 )
 
@@ -111,6 +112,12 @@ func (a *API) Handler() http.Handler {
 	authed.HandleFunc("DELETE /v1/oauth/grants/{id}", a.tool("revoke_oauth_grant", map[string]string{"id": "id"}))
 	authed.HandleFunc("POST /v1/query", a.tool("sql_query", nil))
 
+	// Team members (when the dashboard is on).
+	authed.HandleFunc("GET /v1/members", a.tool("list_members", nil))
+	authed.HandleFunc("POST /v1/members", a.tool("invite_member", nil))
+	authed.HandleFunc("PATCH /v1/members/{id}", a.tool("update_member", map[string]string{"id": "id"}))
+	authed.HandleFunc("DELETE /v1/members/{id}", a.tool("remove_member", map[string]string{"id": "id"}))
+
 	authed.HandleFunc("GET /v1/media", func(w http.ResponseWriter, r *http.Request) {
 		ms, err := a.Svc.Store.ListMedia(r.Context())
 		if err != nil {
@@ -166,20 +173,25 @@ func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		var role mcp.Role
+		ctx := r.Context()
 		switch {
 		case a.Token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.Token)) == 1:
 			role = mcp.RoleAdmin
 		case a.DraftToken != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.DraftToken)) == 1:
 			role = mcp.RoleDrafter
 		default:
-			scope, ok := "", false
+			var acc oauth.Access
+			ok := false
 			if a.OAuth != nil && tok != "" {
-				scope, ok = a.OAuth.Authenticate(r.Context(), tok)
+				acc, ok = a.OAuth.Authenticate(r.Context(), tok)
+			}
+			if ok && acc.UserID != "" {
+				ctx = mcp.WithUser(ctx, acc.UserID)
 			}
 			switch {
-			case ok && scope == oauth.ScopeAdmin:
+			case ok && acc.Scope == oauth.ScopeAdmin:
 				role = mcp.RoleAdmin
-			case ok && scope == oauth.ScopeDrafts:
+			case ok && acc.Scope == oauth.ScopeDrafts:
 				role = mcp.RoleDrafter
 			default:
 				a.unauthorized(w, tok != "")
@@ -190,7 +202,7 @@ func (a *API) auth(next http.Handler) http.Handler {
 			writeJSON(w, 403, map[string]string{"error": mcp.ErrForbidden.Error()})
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(mcp.WithRole(r.Context(), role)))
+		next.ServeHTTP(w, r.WithContext(mcp.WithRole(ctx, role)))
 	})
 }
 
@@ -293,7 +305,15 @@ func (a *API) call(w http.ResponseWriter, r *http.Request, name string, args []b
 
 func (a *API) fail(w http.ResponseWriter, err error) {
 	var inv *core.ErrInvalid
+	var denied *team.ErrDenied
+	var bad *team.ErrBadInput
 	switch {
+	case errors.As(err, &denied):
+		writeJSON(w, 403, map[string]string{"error": err.Error()})
+	case errors.As(err, &bad):
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+	case errors.Is(err, team.ErrNoEmail), errors.Is(err, store.ErrLastOwner), errors.Is(err, store.ErrEmailTaken):
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
 	case errors.Is(err, store.ErrNotFound):
 		writeJSON(w, 404, map[string]string{"error": "not found"})
 	case errors.Is(err, mcp.ErrForbidden):

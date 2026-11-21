@@ -30,3 +30,16 @@ func RoleFrom(ctx context.Context) Role {
 }
 
 var ErrForbidden = errors.New("this API key can only create and edit drafts")
+
+type userKey struct{}
+
+// WithUser records the team member behind the call (an OAuth app approved by that member).
+func WithUser(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, userKey{}, userID)
+}
+
+// UserFrom is the member behind the call, "" for a static token.
+func UserFrom(ctx context.Context) string {
+	s, _ := ctx.Value(userKey{}).(string)
+	return s
+}

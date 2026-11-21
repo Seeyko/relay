@@ -14,9 +14,13 @@ func TestFreshAssertion(t *testing.T) {
 	k := newSoftKey("localhost", h.origin)
 	h.register(k)
 	ctx := t.Context()
+	owner, err := h.st.FirstOwner(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	sign := func(key *softKey) (any, []byte) {
-		opts, st, err := h.ui.BeginAssertion()
+		opts, st, err := h.ui.BeginAssertion(ctx, owner.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -31,14 +35,14 @@ func TestFreshAssertion(t *testing.T) {
 	}
 
 	st, cred := sign(k)
-	if err := h.ui.FinishAssertion(ctx, st, cred); err != nil {
+	if err := h.ui.FinishAssertion(ctx, owner.ID, st, cred); err != nil {
 		t.Fatalf("valid assertion refused: %v", err)
 	}
 
 	// Presence without user verification (no PIN, no biometrics) is not enough.
 	k.noUV = true
 	st, cred = sign(k)
-	if err := h.ui.FinishAssertion(ctx, st, cred); err == nil {
+	if err := h.ui.FinishAssertion(ctx, owner.ID, st, cred); err == nil {
 		t.Fatal("assertion without user verification accepted")
 	}
 	k.noUV = false
@@ -47,13 +51,13 @@ func TestFreshAssertion(t *testing.T) {
 	impostor := newSoftKey("localhost", h.origin)
 	impostor.credID = k.credID
 	st, cred = sign(impostor)
-	if err := h.ui.FinishAssertion(ctx, st, cred); err == nil {
+	if err := h.ui.FinishAssertion(ctx, owner.ID, st, cred); err == nil {
 		t.Fatal("impostor accepted")
 	}
 	phish := *k
 	phish.origin = "https://relay-login.example"
 	st, cred = sign(&phish)
-	if err := h.ui.FinishAssertion(ctx, st, cred); err == nil {
+	if err := h.ui.FinishAssertion(ctx, owner.ID, st, cred); err == nil {
 		t.Fatal("assertion for another origin accepted")
 	}
 	k.count = phish.count
@@ -61,27 +65,30 @@ func TestFreshAssertion(t *testing.T) {
 	// An answer to another challenge fails.
 	st1, _ := sign(k)
 	_, cred2 := sign(k)
-	if err := h.ui.FinishAssertion(ctx, st1, cred2); err == nil {
+	if err := h.ui.FinishAssertion(ctx, owner.ID, st1, cred2); err == nil {
 		t.Fatal("assertion of another challenge accepted")
 	}
 
 	// The check expires.
 	st, cred = sign(k)
 	h.ui.now = func() time.Time { return time.Now().Add(ceremonyTTL + time.Second) }
-	if err := h.ui.FinishAssertion(ctx, st, cred); err == nil {
+	if err := h.ui.FinishAssertion(ctx, owner.ID, st, cred); err == nil {
 		t.Fatal("expired assertion accepted")
 	}
 	h.ui.now = time.Now
-	if err := h.ui.FinishAssertion(ctx, nil, cred); err == nil {
+	if err := h.ui.FinishAssertion(ctx, owner.ID, nil, cred); err == nil {
 		t.Fatal("assertion without state accepted")
 	}
 
-	// SessionID follows the dashboard session.
-	if code, _ := h.login(k); code != 200 {
-		t.Fatal("login failed")
+	// A passkey check started for one member cannot approve for another.
+	st, cred = sign(k)
+	if err := h.ui.FinishAssertion(ctx, "usr_other", st, cred); err == nil {
+		t.Fatal("assertion accepted for another member")
 	}
-	if !h.ui.HasPasskeys(ctx) {
-		t.Fatal("HasPasskeys")
+
+	// LoginMethods follows the passkeys.
+	if pk, _ := h.ui.LoginMethods(ctx); !pk {
+		t.Fatal("LoginMethods")
 	}
 }
 

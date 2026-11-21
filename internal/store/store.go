@@ -155,6 +155,10 @@ var addedColumns = [][3]string{
 	{"accounts", "avatar_media_id", "TEXT"},
 	{"accounts", "avatar_source", "TEXT"},
 	{"accounts", "avatar_checked_at", "TIMESTAMP"},
+	// team members (users.go)
+	{"passkeys", "user_id", "TEXT REFERENCES users(id) ON DELETE CASCADE"},
+	{"oauth_codes", "user_id", "TEXT"},
+	{"oauth_grants", "user_id", "TEXT"},
 }
 
 func (s *Store) migrate() error {
@@ -165,6 +169,9 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if _, err := s.db.Exec(oauthSchema); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(usersSchema); err != nil {
 		return err
 	}
 	for _, c := range addedColumns {
@@ -178,7 +185,7 @@ func (s *Store) migrate() error {
 			}
 		}
 	}
-	return nil
+	return s.migrateUsers()
 }
 
 // ---------- Accounts ----------
@@ -972,7 +979,8 @@ func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult,
 	if strings.Contains(lq, "credentials") {
 		return nil, errors.New("account credentials are not queryable")
 	}
-	if strings.Contains(lq, "passkeys") || strings.Contains(lq, "ui_sessions") || strings.Contains(lq, "oauth_") || strings.Contains(lq, "sqlite_") {
+	if strings.Contains(lq, "passkeys") || strings.Contains(lq, "ui_sessions") || strings.Contains(lq, "oauth_") || strings.Contains(lq, "sqlite_") ||
+		strings.Contains(lq, "users") || strings.Contains(lq, "user_sessions") || strings.Contains(lq, "auth_tokens") || strings.Contains(lq, "audit_log") {
 		return nil, errors.New("dashboard login data is not queryable")
 	}
 	if maxRows <= 0 || maxRows > 1000 {
@@ -1037,6 +1045,7 @@ Use json_extract(metrics, '$.like_count') to read a metric.`
 
 type Passkey struct {
 	ID         string     `json:"id"` // base64url credential id
+	UserID     string     `json:"-"`
 	Name       string     `json:"name"`
 	Credential string     `json:"-"` // JSON-encoded webauthn credential (public key, sign count, flags)
 	CreatedAt  time.Time  `json:"created_at"`
@@ -1045,12 +1054,17 @@ type Passkey struct {
 
 func (s *Store) AddPasskey(ctx context.Context, p *Passkey) error {
 	p.CreatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO passkeys(id,name,credential,created_at) VALUES(?,?,?,?)`, p.ID, p.Name, p.Credential, p.CreatedAt)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO passkeys(id,user_id,name,credential,created_at) VALUES(?,?,?,?,?)`, p.ID, p.UserID, p.Name, p.Credential, p.CreatedAt)
 	return err
 }
 
-func (s *Store) ListPasskeys(ctx context.Context) ([]*Passkey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,credential,created_at,last_used_at FROM passkeys ORDER BY created_at`)
+// ListPasskeys returns every passkey, or the member's when userID is set.
+func (s *Store) ListPasskeys(ctx context.Context, userID ...string) ([]*Passkey, error) {
+	q, args := `SELECT id,COALESCE(user_id,''),name,credential,created_at,last_used_at FROM passkeys ORDER BY created_at`, []any{}
+	if len(userID) > 0 {
+		q, args = `SELECT id,COALESCE(user_id,''),name,credential,created_at,last_used_at FROM passkeys WHERE user_id=? ORDER BY created_at`, []any{userID[0]}
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1059,7 +1073,7 @@ func (s *Store) ListPasskeys(ctx context.Context) ([]*Passkey, error) {
 	for rows.Next() {
 		p := &Passkey{}
 		var last sql.NullTime
-		if err := rows.Scan(&p.ID, &p.Name, &p.Credential, &p.CreatedAt, &last); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Credential, &p.CreatedAt, &last); err != nil {
 			return nil, err
 		}
 		if last.Valid {
@@ -1092,29 +1106,4 @@ func (s *Store) DeletePasskey(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
-}
-
-func (s *Store) CreateUISession(ctx context.Context, tokenHash, passkeyID string, expires time.Time) error {
-	now := time.Now().UTC()
-	_, _ = s.db.ExecContext(ctx, `DELETE FROM ui_sessions WHERE expires_at < ?`, now)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO ui_sessions(token_hash,passkey_id,created_at,expires_at) VALUES(?,?,?,?)`, tokenHash, passkeyID, now, expires.UTC())
-	return err
-}
-
-// UISessionValid reports whether a session exists and has not expired.
-func (s *Store) UISessionValid(ctx context.Context, tokenHash string) (bool, error) {
-	var exp time.Time
-	err := s.db.QueryRowContext(ctx, `SELECT expires_at FROM ui_sessions WHERE token_hash=?`, tokenHash).Scan(&exp)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return time.Now().Before(exp), nil
-}
-
-func (s *Store) DeleteUISession(ctx context.Context, tokenHash string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM ui_sessions WHERE token_hash=?`, tokenHash)
-	return err
 }

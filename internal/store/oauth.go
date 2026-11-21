@@ -77,6 +77,7 @@ type OAuthCode struct {
 	Challenge   string
 	Scope       string
 	Resource    string
+	UserID      string // the member who approved
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
 }
@@ -91,6 +92,9 @@ type OAuthGrant struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  time.Time  `json:"expires_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// UserID and ApprovedBy (name or email) are the member who approved the app.
+	UserID     string `json:"user_id,omitempty"`
+	ApprovedBy string `json:"approved_by,omitempty"`
 }
 
 type OAuthToken struct {
@@ -108,6 +112,11 @@ type OAuthAccess struct {
 	ClientID string
 	Scope    string
 	Resource string
+	// UserID is the member who approved the app ("" for a grant made before team members). UserRole is its
+	// current role and UserActive whether it still exists and is not disabled.
+	UserID     string
+	UserRole   string
+	UserActive bool
 }
 
 func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
@@ -151,8 +160,12 @@ func (s *Store) CreateOAuthCode(ctx context.Context, c *OAuthCode) error {
 	now := time.Now().UTC()
 	// Housekeeping: codes live seconds, keep them an hour for reuse detection, then drop them.
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM oauth_codes WHERE expires_at < ?`, now.Add(-time.Hour))
-	_, err := s.db.ExecContext(ctx, `INSERT INTO oauth_codes(code_hash,client_id,redirect_uri,challenge,scope,resource,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?)`,
-		c.Hash, c.ClientID, c.RedirectURI, c.Challenge, c.Scope, c.Resource, c.CreatedAt.UTC(), c.ExpiresAt.UTC())
+	var uid any
+	if c.UserID != "" {
+		uid = c.UserID
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO oauth_codes(code_hash,client_id,redirect_uri,challenge,scope,resource,created_at,expires_at,user_id) VALUES(?,?,?,?,?,?,?,?,?)`,
+		c.Hash, c.ClientID, c.RedirectURI, c.Challenge, c.Scope, c.Resource, c.CreatedAt.UTC(), c.ExpiresAt.UTC(), uid)
 	return err
 }
 
@@ -178,9 +191,10 @@ func (s *Store) ExchangeOAuthCode(ctx context.Context, hash string, validate fun
 	defer tx.Rollback()
 	c := &OAuthCode{Hash: hash}
 	var used sql.NullTime
-	var grantID sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT client_id,redirect_uri,challenge,scope,resource,created_at,expires_at,used_at,grant_id FROM oauth_codes WHERE code_hash=?`, hash).
-		Scan(&c.ClientID, &c.RedirectURI, &c.Challenge, &c.Scope, &c.Resource, &c.CreatedAt, &c.ExpiresAt, &used, &grantID)
+	var grantID, userID sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT client_id,redirect_uri,challenge,scope,resource,created_at,expires_at,used_at,grant_id,user_id FROM oauth_codes WHERE code_hash=?`, hash).
+		Scan(&c.ClientID, &c.RedirectURI, &c.Challenge, &c.Scope, &c.Resource, &c.CreatedAt, &c.ExpiresAt, &used, &grantID, &userID)
+	c.UserID = userID.String
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -208,9 +222,9 @@ func (s *Store) ExchangeOAuthCode(ctx context.Context, hash string, validate fun
 		}
 		return verr
 	}
-	g.ClientID, g.Scope, g.Resource, g.CreatedAt = c.ClientID, c.Scope, c.Resource, now
-	if _, err := tx.ExecContext(ctx, `INSERT INTO oauth_grants(id,client_id,scope,resource,created_at,expires_at,last_used_at) VALUES(?,?,?,?,?,?,?)`,
-		g.ID, g.ClientID, g.Scope, g.Resource, g.CreatedAt, g.ExpiresAt.UTC(), now); err != nil {
+	g.ClientID, g.Scope, g.Resource, g.CreatedAt, g.UserID = c.ClientID, c.Scope, c.Resource, now, c.UserID
+	if _, err := tx.ExecContext(ctx, `INSERT INTO oauth_grants(id,client_id,scope,resource,created_at,expires_at,last_used_at,user_id) VALUES(?,?,?,?,?,?,?,?)`,
+		g.ID, g.ClientID, g.Scope, g.Resource, g.CreatedAt, g.ExpiresAt.UTC(), now, userID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE oauth_codes SET grant_id=? WHERE code_hash=?`, g.ID, hash); err != nil {
@@ -278,9 +292,13 @@ func (s *Store) OAuthAccessToken(ctx context.Context, hash string, now time.Time
 	a := &OAuthAccess{}
 	var exp, gexp time.Time
 	var last sql.NullTime
-	err := s.db.QueryRowContext(ctx, `SELECT t.grant_id,t.scope,t.expires_at,g.client_id,g.resource,g.expires_at,g.last_used_at
-		FROM oauth_tokens t JOIN oauth_grants g ON g.id=t.grant_id WHERE t.token_hash=? AND t.kind=?`, hash, TokenAccess).
-		Scan(&a.GrantID, &a.Scope, &exp, &a.ClientID, &a.Resource, &gexp, &last)
+	var uid, role sql.NullString
+	var disabled sql.NullBool
+	err := s.db.QueryRowContext(ctx, `SELECT t.grant_id,t.scope,t.expires_at,g.client_id,g.resource,g.expires_at,g.last_used_at,g.user_id,u.role,u.disabled
+		FROM oauth_tokens t JOIN oauth_grants g ON g.id=t.grant_id LEFT JOIN users u ON u.id=g.user_id WHERE t.token_hash=? AND t.kind=?`, hash, TokenAccess).
+		Scan(&a.GrantID, &a.Scope, &exp, &a.ClientID, &a.Resource, &gexp, &last, &uid, &role, &disabled)
+	a.UserID, a.UserRole = uid.String, role.String
+	a.UserActive = role.Valid && !disabled.Bool
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -317,8 +335,9 @@ func (s *Store) RevokeOAuthToken(ctx context.Context, hash, clientID string) err
 // ListOAuthGrants returns the live connections, newest first. Expired grants are deleted on the way.
 func (s *Store) ListOAuthGrants(ctx context.Context) ([]*OAuthGrant, error) {
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM oauth_grants WHERE expires_at < ?`, time.Now().UTC())
-	rows, err := s.db.QueryContext(ctx, `SELECT g.id,g.client_id,c.name,g.scope,g.resource,g.created_at,g.expires_at,g.last_used_at
-		FROM oauth_grants g JOIN oauth_clients c ON c.id=g.client_id ORDER BY g.created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT g.id,g.client_id,c.name,g.scope,g.resource,g.created_at,g.expires_at,g.last_used_at,
+		COALESCE(g.user_id,''),COALESCE(NULLIF(u.name,''),u.email,'')
+		FROM oauth_grants g JOIN oauth_clients c ON c.id=g.client_id LEFT JOIN users u ON u.id=g.user_id ORDER BY g.created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +346,7 @@ func (s *Store) ListOAuthGrants(ctx context.Context) ([]*OAuthGrant, error) {
 	for rows.Next() {
 		g := &OAuthGrant{}
 		var last sql.NullTime
-		if err := rows.Scan(&g.ID, &g.ClientID, &g.ClientName, &g.Scope, &g.Resource, &g.CreatedAt, &g.ExpiresAt, &last); err != nil {
+		if err := rows.Scan(&g.ID, &g.ClientID, &g.ClientName, &g.Scope, &g.Resource, &g.CreatedAt, &g.ExpiresAt, &last, &g.UserID, &g.ApprovedBy); err != nil {
 			return nil, err
 		}
 		if last.Valid {
@@ -337,6 +356,20 @@ func (s *Store) ListOAuthGrants(ctx context.Context) ([]*OAuthGrant, error) {
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+// GetOAuthGrant returns one live connection.
+func (s *Store) GetOAuthGrant(ctx context.Context, id string) (*OAuthGrant, error) {
+	gs, err := s.ListOAuthGrants(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range gs {
+		if g.ID == id {
+			return g, nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
 // DeleteOAuthGrant revokes a connection and every token issued under it.
