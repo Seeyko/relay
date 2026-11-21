@@ -385,6 +385,8 @@ func TestMetaProviders(t *testing.T) {
 		// Facebook
 		case p == "/v26.0/123" && r.Method == "GET":
 			w.Write([]byte(`{"id":"123","name":"Alice Page","username":"alicepage"}`))
+		case p == "/v26.0/123/picture": // a Page without a picture: nothing to download
+			w.Write([]byte(`{"data":{"url":"https://cdn.fb/silhouette.png","is_silhouette":true}}`))
 		case p == "/v26.0/123/feed":
 			if r.FormValue("message") != "hello fb" {
 				t.Errorf("fb message: %q", r.FormValue("message"))

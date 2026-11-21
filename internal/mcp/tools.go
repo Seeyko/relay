@@ -106,8 +106,9 @@ func BuildTools(svc *core.Service) []Tool {
 			},
 		},
 		{
-			Name:        "list_accounts",
-			Description: "List connected social accounts (id, network, handle). Use the ids in schedule_post.",
+			Name: "list_accounts",
+			Description: "List connected social accounts (id, network, handle, avatar). Use the ids in schedule_post. avatar is the profile picture " +
+				"(/media/<file> on this Relay), avatar_source says whether it comes from the network (auto) or from set_account_avatar (manual).",
 			InputSchema: obj(map[string]any{}),
 			handler: func(ctx context.Context, _ json.RawMessage) (any, error) {
 				return svc.Store.ListAccounts(ctx)
@@ -135,6 +136,27 @@ func BuildTools(svc *core.Service) []Tool {
 					a.Credentials = map[string]string{}
 				}
 				return svc.ConnectAccount(ctx, a.Provider, a.Name, a.Credentials)
+			},
+		},
+		{
+			Name:  "set_account_avatar",
+			Admin: true,
+			Description: "Set the profile picture Relay shows for an account in its previews, or for every account (account_id \"all\"). " +
+				"Relay downloads each network's own picture by itself (on connect, import_history and once a day); a picture set here wins " +
+				"over it until cleared with clear: true, which brings the network's picture back. Give media (an image id from the media library) " +
+				"or media_url (an image URL, downloaded into the library).",
+			InputSchema: obj(map[string]any{
+				"account_id": str("Account id, or \"all\" for every account"),
+				"media":      str("Image media id (from upload_media_from_url or the media library)"),
+				"media_url":  str("Image URL to download, instead of media"),
+				"clear":      map[string]any{"type": "boolean", "description": "Remove the manual picture: the network's own picture comes back"},
+			}, "account_id"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				in, err := decode[core.AvatarInput](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.SetAvatar(ctx, in)
 			},
 		},
 		{

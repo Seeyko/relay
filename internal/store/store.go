@@ -151,6 +151,9 @@ CREATE TABLE IF NOT EXISTS ui_sessions (
 // columns added after the first release: table, column, definition.
 var addedColumns = [][3]string{
 	{"posts", "planned_at", "TIMESTAMP"},
+	{"accounts", "avatar_media_id", "TEXT"},
+	{"accounts", "avatar_source", "TEXT"},
+	{"accounts", "avatar_checked_at", "TIMESTAMP"},
 }
 
 func (s *Store) migrate() error {
@@ -184,7 +187,22 @@ type Account struct {
 	RemoteUserID string    `json:"remote_user_id"`
 	Credentials  []byte    `json:"-"` // encrypted blob
 	CreatedAt    time.Time `json:"created_at"`
+	// Avatar is the profile picture as /media/<file> on this Relay instance ("" when there is none).
+	Avatar string `json:"avatar,omitempty"`
+	// AvatarMediaID is the media library id of the profile picture.
+	AvatarMediaID string `json:"avatar_media_id,omitempty"`
+	// AvatarSource is auto (downloaded from the network) or manual (set with set_account_avatar).
+	// A manual picture is never replaced by the automatic one until it is cleared.
+	AvatarSource string `json:"avatar_source,omitempty"`
+	// AvatarCheckedAt is the last time Relay asked the network for the picture.
+	AvatarCheckedAt *time.Time `json:"avatar_checked_at,omitempty"`
 }
+
+// Avatar sources.
+const (
+	AvatarAuto   = "auto"
+	AvatarManual = "manual"
+)
 
 func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 	if a.ID == "" {
@@ -196,39 +214,89 @@ func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
 	return err
 }
 
+// UpdateAccount saves the identity and credentials. The avatar columns have their own setters.
 func (s *Store) UpdateAccount(ctx context.Context, a *Account) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET name=?, handle=?, remote_user_id=?, credentials=? WHERE id=?`,
 		a.Name, a.Handle, a.RemoteUserID, a.Credentials, a.ID)
 	return err
 }
 
-func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id,provider,name,handle,remote_user_id,credentials,created_at FROM accounts WHERE id=?`, id)
+const accountSelect = `SELECT a.id,a.provider,a.name,a.handle,a.remote_user_id,a.credentials,a.created_at,
+a.avatar_media_id,a.avatar_source,a.avatar_checked_at,m.path FROM accounts a LEFT JOIN media m ON m.id=a.avatar_media_id`
+
+func scanAccount(r scanner) (*Account, error) {
 	a := &Account{}
-	if err := row.Scan(&a.ID, &a.Provider, &a.Name, &a.Handle, &a.RemoteUserID, &a.Credentials, &a.CreatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
+	var mediaID, source, mpath sql.NullString
+	var checked sql.NullTime
+	if err := r.Scan(&a.ID, &a.Provider, &a.Name, &a.Handle, &a.RemoteUserID, &a.Credentials, &a.CreatedAt, &mediaID, &source, &checked, &mpath); err != nil {
 		return nil, err
+	}
+	a.AvatarMediaID, a.AvatarSource, a.AvatarCheckedAt = mediaID.String, source.String, nt(checked)
+	if mpath.Valid { // the media row may have been deleted: then there is no picture to show
+		a.Avatar = "/media/" + (&Media{Path: mpath.String}).Key()
 	}
 	return a, nil
 }
 
+func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
+	a, err := scanAccount(s.db.QueryRowContext(ctx, accountSelect+` WHERE a.id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return a, err
+}
+
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,provider,name,handle,remote_user_id,credentials,created_at FROM accounts ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, accountSelect+` ORDER BY a.created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []*Account
 	for rows.Next() {
-		a := &Account{}
-		if err := rows.Scan(&a.ID, &a.Provider, &a.Name, &a.Handle, &a.RemoteUserID, &a.Credentials, &a.CreatedAt); err != nil {
+		a, err := scanAccount(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+// SetAccountAvatar sets the profile picture of an account (mediaID "" removes it) and the time the
+// network was last asked. An automatic picture never replaces a manual one: it returns false then.
+func (s *Store) SetAccountAvatar(ctx context.Context, id, mediaID, source string, checkedAt *time.Time) (bool, error) {
+	q := `UPDATE accounts SET avatar_media_id=?, avatar_source=?, avatar_checked_at=? WHERE id=?`
+	if source == AvatarAuto {
+		q += ` AND COALESCE(avatar_source,'') != 'manual'`
+	}
+	res, err := s.db.ExecContext(ctx, q, nullStr(mediaID), nullStr(source), checkedAt, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// TouchAccountAvatar records that the network was asked for the picture, without changing it.
+func (s *Store) TouchAccountAvatar(ctx context.Context, id string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET avatar_checked_at=? WHERE id=?`, at, id)
+	return err
+}
+
+// MediaInUse reports whether a media file is the picture of an account or attached to a post.
+func (s *Store) MediaInUse(ctx context.Context, id string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM accounts WHERE avatar_media_id=?) +
+(SELECT COUNT(*) FROM posts p, json_each(p.media) j WHERE j.value=?)`, id, id).Scan(&n)
+	return n > 0, err
+}
+
+func nullStr(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {
@@ -902,7 +970,7 @@ func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult,
 }
 
 // Schema is shown to agents so they can write queries.
-const Schema = `accounts(id, provider, name, handle, remote_user_id, created_at)
+const Schema = `accounts(id, provider, name, handle, remote_user_id, created_at, avatar_media_id, avatar_source 'auto'|'manual', avatar_checked_at)
 posts(id, group_id, account_id, status, parts JSON array, media JSON array, options JSON, scheduled_at, planned_at (drafts only), published_at,
       remote_id, remote_ids JSON, remote_url, error, attempts, metrics JSON (latest), metrics_at, source 'relay'|'imported', created_at)
 metric_snapshots(post_id, at, metrics JSON)      -- one row per collection, for growth curves

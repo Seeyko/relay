@@ -123,11 +123,19 @@ claude mcp add --transport http relay https://<your-host>/mcp --header "Authoriz
 
 Tools:
 
-- Accounts: `list_providers`, `list_accounts`, `connect_account`, `import_history`
+- Accounts: `list_providers`, `list_accounts`, `connect_account`, `import_history`, `set_account_avatar`
 - Posts: `validate_post`, `schedule_post`, `list_posts`, `get_post`, `update_post`, `approve_post`, `delete_post`, `publish_now`, `upload_media_from_url`
 - Analytics: `analyze`, `post_timeline`, `account_growth`, `refresh_metrics`, `sql_query`
 - Conversations: `list_comments`, `reply_comment`
 - Browser agent: `create_browser_task`, `list_browser_tasks`
+
+### Profile pictures
+
+Relay copies each account's profile picture (Page logo for LinkedIn and Facebook) from the network into
+its media library on connect, on `import_history` and at most once a day with the account counters.
+`set_account_avatar` (or `PUT /v1/accounts/{id}/avatar`, `PUT /v1/accounts/avatar` for every account) sets
+one picture by hand: `{"media": "<media id>"}` or `{"media_url": "https://..."}`. It wins over the
+network's picture until `{"clear": true}`. The dashboard draws it in every post preview.
 
 ### Drafts-only keys
 
@@ -192,6 +200,7 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | GET / POST | `/v1/accounts` | `list_accounts` / `connect_account` |
 | DELETE | `/v1/accounts/{id}` | |
 | POST | `/v1/accounts/{id}/import` | `import_history` |
+| PUT | `/v1/accounts/{id}/avatar`, `/v1/accounts/avatar` (all accounts) | `set_account_avatar` |
 | GET / POST | `/v1/posts` | `list_posts` / `schedule_post` |
 | GET / PATCH / DELETE | `/v1/posts/{id}` | `get_post` / `update_post` / `delete_post` |
 | POST | `/v1/posts/{id}/publish` | `publish_now` |

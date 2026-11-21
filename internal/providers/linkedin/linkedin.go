@@ -126,6 +126,7 @@ type Client struct {
 	creds   map[string]string
 	persist func(map[string]string) error
 	mu      sync.Mutex
+	logos   []string // logoV2 asset URNs (cropped, original) seen by the last Identify call
 }
 
 func (c *Client) orgURN() string { return "urn:li:organization:" + c.OrgID }
@@ -478,6 +479,12 @@ func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 		ID            json.Number `json:"id"`
 		LocalizedName string      `json:"localizedName"`
 		VanityName    string      `json:"vanityName"`
+		// LogoV2 holds digitalmediaAsset URNs of the Page logo: cropped (the square shown on the
+		// Page) and original.
+		LogoV2 struct {
+			Cropped  string `json:"cropped"`
+			Original string `json:"original"`
+		} `json:"logoV2"`
 	}
 	if _, err := c.call(ctx, "GET", "/rest/organizations/"+url.PathEscape(c.OrgID), "", nil, &r, nil); err != nil {
 		return nil, err
@@ -486,7 +493,42 @@ func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 	if id == "" {
 		id = c.OrgID
 	}
+	c.logos = c.logos[:0]
+	for _, u := range []string{r.LogoV2.Cropped, r.LogoV2.Original} {
+		if u != "" {
+			c.logos = append(c.logos, u)
+		}
+	}
 	return &providers.Identity{RemoteUserID: id, Handle: r.VanityName, Name: r.LocalizedName}, nil
+}
+
+// AvatarURL is the Page logo: logoV2 of GET /rest/organizations/{id} (the call Identify makes), then
+// GET /rest/images/{urn} for its downloadUrl. The logo is a digitalmediaAsset URN; the Images API
+// takes the same id as urn:li:image. The cropped logo comes first, the original is the fallback.
+func (c *Client) AvatarURL(ctx context.Context) (string, error) {
+	if len(c.logos) == 0 {
+		if _, err := c.Identify(ctx); err != nil {
+			return "", err
+		}
+	}
+	var last error
+	for _, asset := range c.logos {
+		urn := asset
+		if id, ok := strings.CutPrefix(asset, "urn:li:digitalmediaAsset:"); ok {
+			urn = "urn:li:image:" + id
+		}
+		var r struct {
+			DownloadURL string `json:"downloadUrl"`
+		}
+		if _, err := c.call(ctx, "GET", "/rest/images/"+enc(urn), "", nil, &r, nil); err != nil {
+			last = err
+			continue
+		}
+		if r.DownloadURL != "" {
+			return r.DownloadURL, nil
+		}
+	}
+	return "", last
 }
 
 // AccountMetrics reads the follower count (networkSizes, COMPANY_FOLLOWED_BY_MEMBER since 202305).

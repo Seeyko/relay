@@ -144,6 +144,7 @@ type Instagram struct {
 	// fbLogin: the account is reached through its Facebook Page (graph.facebook.com, Page token).
 	// There is no /me for the Instagram user and the Page token does not expire, so nothing is refreshed.
 	fbLogin bool
+	avatar  string // profile_picture_url seen by the last Identify or AccountMetrics call
 	// PollInterval for container processing (tests override it).
 	PollInterval time.Duration
 }
@@ -193,15 +194,17 @@ func (ig *Instagram) Identify(ctx context.Context) (*providers.Identity, error) 
 		UserID   string `json:"user_id"`
 		Username string `json:"username"`
 		Name     string `json:"name"`
+		Picture  string `json:"profile_picture_url"`
 	}
 	if ig.fbLogin {
 		// The IG User node has no user_id field: its id is already the professional account id.
-		if err := ig.g.get(ctx, "/"+ig.creds["user_id"], url.Values{"fields": {"id,username,name"}}, &r); err != nil {
+		if err := ig.g.get(ctx, "/"+ig.creds["user_id"], url.Values{"fields": {"id,username,name,profile_picture_url"}}, &r); err != nil {
 			return nil, err
 		}
-	} else if err := ig.g.get(ctx, "/me", url.Values{"fields": {"id,user_id,username,name"}}, &r); err != nil {
+	} else if err := ig.g.get(ctx, "/me", url.Values{"fields": {"id,user_id,username,name,profile_picture_url"}}, &r); err != nil {
 		return nil, err
 	}
+	ig.avatar = r.Picture
 	// user_id is the professional account ID used by /<IG_ID>/media; id is app-scoped.
 	id := r.UserID
 	if id == "" {
@@ -212,23 +215,36 @@ func (ig *Instagram) Identify(ctx context.Context) (*providers.Identity, error) 
 	if name == "" {
 		name = r.Username
 	}
-	return &providers.Identity{RemoteUserID: id, Handle: r.Username, Name: name}, nil
+	return &providers.Identity{RemoteUserID: id, Handle: r.Username, Name: name, AvatarURL: r.Picture}, nil
+}
+
+// AvatarURL is the profile picture (profile_picture_url on /me, or on the IG User node with login=facebook).
+func (ig *Instagram) AvatarURL(ctx context.Context) (string, error) {
+	if ig.avatar != "" {
+		return ig.avatar, nil
+	}
+	if _, err := ig.Identify(ctx); err != nil {
+		return "", err
+	}
+	return ig.avatar, nil
 }
 
 func (ig *Instagram) AccountMetrics(ctx context.Context) (map[string]int64, error) {
 	ig.maybeRefresh(ctx)
 	var r struct {
-		Followers int64 `json:"followers_count"`
-		Follows   int64 `json:"follows_count"`
-		Media     int64 `json:"media_count"`
+		Followers int64  `json:"followers_count"`
+		Follows   int64  `json:"follows_count"`
+		Media     int64  `json:"media_count"`
+		Picture   string `json:"profile_picture_url"`
 	}
 	node := "/me"
 	if ig.fbLogin {
 		node = "/" + ig.creds["user_id"]
 	}
-	if err := ig.g.get(ctx, node, url.Values{"fields": {"followers_count,follows_count,media_count"}}, &r); err != nil {
+	if err := ig.g.get(ctx, node, url.Values{"fields": {"followers_count,follows_count,media_count,profile_picture_url"}}, &r); err != nil {
 		return nil, err
 	}
+	ig.avatar = r.Picture
 	return map[string]int64{"followers": r.Followers, "following": r.Follows, "posts": r.Media}, nil
 }
 

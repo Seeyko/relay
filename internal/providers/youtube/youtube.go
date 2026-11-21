@@ -90,6 +90,7 @@ type Client struct {
 	creds   map[string]string
 	persist func(map[string]string) error
 	mu      sync.Mutex
+	avatar  string // channel picture seen by the last Identify or AccountMetrics call
 }
 
 // ---------- validation ----------
@@ -415,6 +416,10 @@ type channel struct {
 	Snippet struct {
 		Title     string `json:"title"`
 		CustomURL string `json:"customUrl"`
+		// Thumbnails is the channel picture: default (88px), medium (240px), high (800px).
+		Thumbnails map[string]struct {
+			URL string `json:"url"`
+		} `json:"thumbnails"`
 	} `json:"snippet"`
 	ContentDetails struct {
 		RelatedPlaylists struct {
@@ -455,15 +460,46 @@ func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 	}
 	c.mu.Lock()
 	c.creds["channel_id"] = ch.ID
+	c.avatar = ch.picture()
 	c.mu.Unlock()
-	return &providers.Identity{RemoteUserID: ch.ID, Handle: ch.Snippet.CustomURL, Name: ch.Snippet.Title}, nil
+	return &providers.Identity{RemoteUserID: ch.ID, Handle: ch.Snippet.CustomURL, Name: ch.Snippet.Title, AvatarURL: ch.picture()}, nil
 }
 
+// picture is the largest channel thumbnail.
+func (ch *channel) picture() string {
+	for _, k := range []string{"high", "medium", "default"} {
+		if t, ok := ch.Snippet.Thumbnails[k]; ok && t.URL != "" {
+			return t.URL
+		}
+	}
+	return ""
+}
+
+// AvatarURL is the channel picture (channels?part=snippet&mine=true, snippet.thumbnails.high).
+func (c *Client) AvatarURL(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	av := c.avatar
+	c.mu.Unlock()
+	if av != "" {
+		return av, nil
+	}
+	ch, err := c.myChannel(ctx, "snippet")
+	if err != nil {
+		return "", err
+	}
+	return ch.picture(), nil
+}
+
+// AccountMetrics reads the channel statistics, and its snippet for the picture: the same call and
+// quota cost (1 unit), so the daily avatar refresh is free.
 func (c *Client) AccountMetrics(ctx context.Context) (map[string]int64, error) {
-	ch, err := c.myChannel(ctx, "statistics")
+	ch, err := c.myChannel(ctx, "statistics,snippet")
 	if err != nil {
 		return nil, err
 	}
+	c.mu.Lock()
+	c.avatar = ch.picture()
+	c.mu.Unlock()
 	out := map[string]int64{"posts": int64(ch.Statistics.VideoCount), "views_total": int64(ch.Statistics.ViewCount)}
 	if !ch.Statistics.HiddenSubscriberCount {
 		out["followers"] = int64(ch.Statistics.SubscriberCount)

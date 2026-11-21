@@ -86,6 +86,7 @@ func (s *Service) ConnectAccount(ctx context.Context, provider, name string, cre
 	if err := s.Store.CreateAccount(ctx, acc); err != nil {
 		return nil, err
 	}
+	s.refreshAvatar(ctx, acc, cl, true)
 	return acc, nil
 }
 
@@ -651,6 +652,7 @@ func (s *Service) ImportHistory(ctx context.Context, accountID string, since tim
 		return res, err
 	}
 	items, herr := cl.History(ctx, since, max)
+	s.refreshAvatar(ctx, acc, cl, true)
 	for _, it := range items {
 		ca := it.CreatedAt.UTC()
 		p := &store.Post{AccountID: acc.ID, Parts: []string{it.Text}, RemoteID: it.RemoteID, RemoteIDs: []string{it.RemoteID}, RemoteURL: it.URL, PublishedAt: &ca, Metrics: it.Metrics, CreatedAt: ca}
@@ -724,43 +726,52 @@ func (s *Service) importVisuals(ctx context.Context, acc *store.Account, postID 
 // saveVisual downloads one image (never a video) of at most maxVisualSize into the media library.
 // The network URLs are signed and expire, so Relay keeps its own copy instead of the link.
 func (s *Service) saveVisual(ctx context.Context, rawURL, name string) (*store.Media, error) {
+	b, mt, err := s.fetchImage(ctx, rawURL, maxVisualSize)
+	if err != nil {
+		return nil, err
+	}
+	return s.SaveMedia(ctx, bytes.NewReader(b), name+imageExt[mt], mt)
+}
+
+// fetchImage downloads one image of at most max bytes and returns it with its media type.
+func (s *Service) fetchImage(ctx context.Context, rawURL string, max int64) ([]byte, string, error) {
 	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
-		return nil, fmt.Errorf("not an http(s) url")
+		return nil, "", fmt.Errorf("not an http(s) url")
 	}
 	ctx, cancel := context.WithTimeout(ctx, visualTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	resp, err := s.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("http %d", resp.StatusCode)
 	}
-	if resp.ContentLength > maxVisualSize {
-		return nil, fmt.Errorf("image larger than %d MB", maxVisualSize>>20)
+	tooBig := fmt.Errorf("image larger than %d MB", max>>20)
+	if resp.ContentLength > max {
+		return nil, "", tooBig
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxVisualSize+1))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if len(b) > maxVisualSize {
-		return nil, fmt.Errorf("image larger than %d MB", maxVisualSize>>20)
+	if int64(len(b)) > max {
+		return nil, "", tooBig
 	}
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if !strings.HasPrefix(mt, "image/") {
 		// CDNs sometimes answer application/octet-stream (or nothing): trust the bytes.
 		mt = http.DetectContentType(b)
 	}
-	ext, ok := imageExt[mt]
-	if !ok {
-		return nil, fmt.Errorf("not an image (%s)", mt)
+	if _, ok := imageExt[mt]; !ok {
+		return nil, "", fmt.Errorf("not an image (%s)", mt)
 	}
-	return s.SaveMedia(ctx, bytes.NewReader(b), name+ext, mt)
+	return b, mt, nil
 }
 
 var imageExt = map[string]string{
@@ -856,11 +867,14 @@ func (s *Service) SnapshotAccounts(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// SnapshotAccount records the account counters, then refreshes its profile picture when due (once a
+// day): most networks return the picture in the counters call, so the refresh costs nothing more.
 func (s *Service) SnapshotAccount(ctx context.Context, a *store.Account) (map[string]int64, error) {
 	cl, err := s.client(ctx, a)
 	if err != nil {
 		return nil, err
 	}
+	defer s.refreshAvatar(ctx, a, cl, false)
 	st, ok := cl.(providers.AccountStatser)
 	if !ok {
 		return nil, providers.ErrUnsupported
