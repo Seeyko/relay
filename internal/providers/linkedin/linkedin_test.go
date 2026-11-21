@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -625,10 +626,23 @@ func TestHistory(t *testing.T) {
 				`{"id":"urn:li:share:1","commentary":"Ride {hashtag|\\#|skate} with @[Devtestco](urn:li:organization:1) \\(now\\)","publishedAt":` + ms(time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"MAIN_FEED"},"content":{"media":{"id":"urn:li:video:V"}}},` +
 				`{"id":"urn:li:share:2","commentary":"","createdAt":` + ms(2*time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"MAIN_FEED"},"reshareContext":{"parent":"urn:li:share:0"}},` +
 				`{"id":"urn:li:share:3","commentary":"ad","createdAt":` + ms(3*time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"NONE"}},` +
-				`{"id":"urn:li:ugcPost:4","commentary":"pics","createdAt":` + ms(4*time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"MAIN_FEED"},"content":{"multiImage":{"images":[]}}},` +
+				`{"id":"urn:li:ugcPost:4","commentary":"pics","createdAt":` + ms(4*time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"MAIN_FEED"},"content":{"multiImage":{"images":[{"id":"urn:li:image:A"},{"id":"urn:li:image:B"}]}}},` +
+				`{"id":"urn:li:share:6","commentary":"link","createdAt":` + ms(5*time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"MAIN_FEED"},"content":{"article":{"source":"https://x.example","thumbnail":"urn:li:image:T"}}},` +
+				`{"id":"urn:li:share:7","commentary":"deck","createdAt":` + ms(6*time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"MAIN_FEED"},"content":{"media":{"id":"urn:li:document:D"}}},` +
 				`{"id":"urn:li:share:5","commentary":"old","createdAt":` + ms(48*time.Hour) + `,"lifecycleState":"PUBLISHED","distribution":{"feedDistribution":"MAIN_FEED"}}]}`))
 		case "/rest/organizationalEntityShareStatistics":
 			w.Write([]byte(`{"elements":[{"share":"urn:li:share:1","totalShareStatistics":{"impressionCount":50,"likeCount":3}}]}`))
+		case "/rest/images":
+			if r.URL.RawQuery != "ids=List(urn%3Ali%3Aimage%3AA,urn%3Ali%3Aimage%3AB,urn%3Ali%3Aimage%3AT)" {
+				t.Errorf("images query %s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`{"results":{"urn:li:image:A":{"id":"urn:li:image:A","downloadUrl":"https://media.licdn.com/A","status":"AVAILABLE"},` +
+				`"urn:li:image:B":{"downloadUrl":"https://media.licdn.com/B"},"urn:li:image:T":{"downloadUrl":"https://media.licdn.com/T"}},"errors":{}}`))
+		case "/rest/videos":
+			if r.URL.RawQuery != "ids=List(urn%3Ali%3Avideo%3AV)" {
+				t.Errorf("videos query %s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`{"results":{"urn:li:video:V":{"downloadUrl":"https://media.licdn.com/V.mp4","thumbnail":"https://media.licdn.com/V-thumb"}}}`))
 		default:
 			return false
 		}
@@ -638,13 +652,25 @@ func TestHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 {
+	wantVis := [][]providers.Visual{
+		{{URL: "https://media.licdn.com/V-thumb", Cover: true}},
+		nil, // repost
+		{{URL: "https://media.licdn.com/A"}, {URL: "https://media.licdn.com/B"}},
+		{{URL: "https://media.licdn.com/T"}},
+		nil, // document: no image in the API
+	}
+	for i, w := range wantVis {
+		if i < len(items) && !reflect.DeepEqual(items[i].Visuals, w) {
+			t.Errorf("item %s visuals %+v want %+v", items[i].RemoteID, items[i].Visuals, w)
+		}
+	}
+	if len(items) != 5 {
 		t.Fatalf("%+v", items)
 	}
 	if items[0].Text != "Ride #skate with Devtestco (now)" || items[0].Kind != "video" || items[0].Metrics["impression_count"] != 50 || items[0].URL != "https://www.linkedin.com/feed/update/urn:li:share:1" {
 		t.Fatalf("%+v", items[0])
 	}
-	if items[1].Kind != "repost" || items[2].Kind != "carousel" || items[2].RemoteID != "urn:li:ugcPost:4" {
+	if items[1].Kind != "repost" || items[2].Kind != "carousel" || items[2].RemoteID != "urn:li:ugcPost:4" || items[3].Kind != "article" || items[4].Kind != "document" {
 		t.Fatalf("%+v", items)
 	}
 }

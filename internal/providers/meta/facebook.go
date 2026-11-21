@@ -531,8 +531,41 @@ type fbPaging struct {
 func (p fbPaging) more(n int) bool { return p.Next != "" && p.Cursors.After != "" && n > 0 }
 
 type fbAttachment struct {
-	Type      string `json:"type"`
-	MediaType string `json:"media_type"`
+	Type      string  `json:"type"`
+	MediaType string  `json:"media_type"`
+	Media     fbMedia `json:"media"`
+	// Subattachments are the photos/videos of an album or a multi-photo post.
+	Subattachments struct {
+		Data []fbAttachment `json:"data"`
+	} `json:"subattachments"`
+}
+
+// fbMedia is StoryAttachment.media: for a photo the display-size image, for a video its thumbnail.
+type fbMedia struct {
+	Image struct {
+		Src string `json:"src"`
+	} `json:"image"`
+}
+
+func (a fbAttachment) isVideo() bool {
+	return strings.Contains(a.Type, "video") || a.MediaType == "video"
+}
+
+// fbVisuals adds the images of a Page post: the attachments' media (album photos through
+// subattachments), else full_picture.
+func fbVisuals(it *providers.HistoryItem, atts []fbAttachment, fullPicture string) {
+	for _, a := range atts {
+		if len(a.Subattachments.Data) > 0 {
+			for _, sa := range a.Subattachments.Data {
+				it.AddVisual(sa.Media.Image.Src, sa.isVideo())
+			}
+			continue
+		}
+		it.AddVisual(a.Media.Image.Src, a.isVideo())
+	}
+	if len(it.Visuals) == 0 {
+		it.AddVisual(fullPicture, it.Kind == "video")
+	}
 }
 
 // fbKind classifies a Page post from its attachments (StoryAttachment.type / media_type) and status_type.
@@ -556,11 +589,15 @@ func fbKind(statusType string, atts []fbAttachment) string {
 	return "text"
 }
 
+// fbHistoryFields reads the posts with their visuals in the same request.
+const fbHistoryFields = "id,message,created_time,permalink_url,status_type,full_picture," +
+	"attachments{type,media_type,media{image{src}},subattachments{type,media_type,media{image{src}}}}"
+
 func (f *Facebook) History(ctx context.Context, since time.Time, max int) ([]providers.HistoryItem, error) {
 	if max <= 0 {
 		max = 2000
 	}
-	q := url.Values{"fields": {"id,message,created_time,permalink_url,status_type,attachments{type,media_type}"}, "limit": {fbPageSize}}
+	q := url.Values{"fields": {fbHistoryFields}, "limit": {fbPageSize}}
 	if !since.IsZero() {
 		q.Set("since", strconv.FormatInt(since.Unix(), 10))
 	}
@@ -574,6 +611,7 @@ func (f *Facebook) History(ctx context.Context, since time.Time, max int) ([]pro
 				CreatedTime  string `json:"created_time"`
 				PermalinkURL string `json:"permalink_url"`
 				StatusType   string `json:"status_type"`
+				FullPicture  string `json:"full_picture"`
 				Attachments  struct {
 					Data []fbAttachment `json:"data"`
 				} `json:"attachments"`
@@ -584,7 +622,9 @@ func (f *Facebook) History(ctx context.Context, since time.Time, max int) ([]pro
 			return out, err
 		}
 		for _, p := range r.Data {
-			out = append(out, providers.HistoryItem{RemoteID: p.ID, Text: p.Message, URL: p.PermalinkURL, CreatedAt: parseGraphTime(p.CreatedTime), Kind: fbKind(p.StatusType, p.Attachments.Data)})
+			it := providers.HistoryItem{RemoteID: p.ID, Text: p.Message, URL: p.PermalinkURL, CreatedAt: parseGraphTime(p.CreatedTime), Kind: fbKind(p.StatusType, p.Attachments.Data)}
+			fbVisuals(&it, p.Attachments.Data, p.FullPicture)
+			out = append(out, it)
 		}
 		if !r.Paging.more(len(r.Data)) {
 			break

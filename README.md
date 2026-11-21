@@ -13,7 +13,7 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
   accounts and formats, hashtags, text, links, media), "what happened during the period" from snapshots, and read-only SQL
 - Read and reply to comments
 - Pre-flight validation (character limits, media rules) and a **drafts-only API key** for sub-agents
-- Import an account's history (build a "my content" archive)
+- Import an account's history (build a "my content" archive), with each post's images and video covers
 - Signed webhooks (`post.scheduled`, `post.published`, `post.failed`, `comment.new`, `feedback.new`, `feedback.updated`)
 - **Agent feedback loop**: when a user asks for something Relay cannot do, the agent files it with `submit_feedback`
   (full text + screenshots); maintainer agents read open feedback and open pull requests
@@ -148,6 +148,39 @@ A draft can carry `planned_at`, the time it is meant to go out. It never publish
 - `approve_post` without `scheduled_at` schedules the draft at its `planned_at` when that is still in the future.
   Otherwise (no planned time, or a past one) it publishes within one tick, as before. An explicit `scheduled_at` wins.
 - `get_post`, `list_posts` and the REST API return `planned_at`; `from`/`to` filters date drafts by it.
+
+### History import and visuals
+
+`import_history` (or `POST /v1/accounts/{id}/import`) archives an account's past posts with their text and metrics,
+and copies each post's **visuals** into the media library, so `post.media` lists them and the dashboard shows them
+like posts made in Relay. A visual is a photo of a photo post or carousel, or the cover of a video. Video files are
+never downloaded. The networks serve visuals through signed CDN links that expire, so Relay downloads them during
+the import and never keeps the remote link. Media go to the bucket when `RELAY_S3_*` is set, else to `/data/media`.
+
+- At most 10 visuals per post; an image over 15 MB, or a link that does not answer with an image, is skipped.
+- Best effort: a failed download is logged (`import: visual download failed`) and counted in `visuals_failed`. The post
+  is still imported.
+- Re-running `import_history` refreshes metrics and fills the visuals of imported posts that have none yet (backfill).
+  It never downloads again for a post that has visuals and never changes posts created in Relay.
+- `"visuals": false` imports text and metrics only.
+- The result is `{"created", "updated", "visuals", "visuals_failed"}`.
+
+Where each connector finds the visuals (in the same request as the posts, except LinkedIn):
+
+| Provider | Field | Size |
+| --- | --- | --- |
+| `x` | `media.url` (photos, `?name=medium`, at most 1200 px), `preview_image_url` (videos, GIFs) | 100-300 KB |
+| `instagram` | `media_url` (images), `thumbnail_url` (videos, Reels), `children{...}` (carousels) | 100-400 KB (1080 px) |
+| `facebook` | `attachments{media{image{src}},subattachments}`, else `full_picture` (link previews) | 50-150 KB (720 px) |
+| `threads` | `media_url` (images), `thumbnail_url` (videos), `children{...}` (carousels) | 100-400 KB |
+| `tiktok` | `cover_image_url` | 30-100 KB |
+| `youtube` | `snippet.thumbnails`: maxres, then standard, high, medium | 50-200 KB (1280x720) |
+| `linkedin-page` | image URNs (also article thumbnails) via `GET /rest/images?ids=List(...)` (`downloadUrl`), video URNs via `GET /rest/videos?ids=List(...)` (`thumbnail`), 50 per call | the original upload: 0.2-5 MB |
+
+Expect about 0.1-0.3 MB per single-image or video post, and up to 10 times that for a carousel. LinkedIn serves the
+original file, so its posts are the heaviest. Not imported: LinkedIn documents (the API gives the PDF, not a preview
+image), polls and text posts, reposts (the visual belongs to someone else), and images the network withholds
+(Instagram omits `media_url` for media with copyrighted music).
 
 ## REST API
 

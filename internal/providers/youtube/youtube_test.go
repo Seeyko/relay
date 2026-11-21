@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -452,9 +453,11 @@ func TestHistoryPagination(t *testing.T) {
 			t.Errorf("videos query %v", q)
 		}
 		writeJSON(w, map[string]any{"items": []any{
-			map[string]any{"id": "s1", "snippet": map[string]any{"title": "Clip #shorts", "description": "", "publishedAt": "2026-03-01T00:00:00Z"},
+			map[string]any{"id": "s1", "snippet": map[string]any{"title": "Clip #shorts", "description": "", "publishedAt": "2026-03-01T00:00:00Z",
+				"thumbnails": map[string]any{"default": map[string]any{"url": "https://i.ytimg.com/vi/s1/default.jpg"}, "high": map[string]any{"url": "https://i.ytimg.com/vi/s1/hqdefault.jpg"}}},
 				"contentDetails": map[string]any{"duration": "PT45S"}, "statistics": map[string]any{"viewCount": "9"}},
-			map[string]any{"id": "l1", "snippet": map[string]any{"title": "Long", "description": "Deep dive", "publishedAt": "2026-02-01T00:00:00Z"},
+			map[string]any{"id": "l1", "snippet": map[string]any{"title": "Long", "description": "Deep dive", "publishedAt": "2026-02-01T00:00:00Z",
+				"thumbnails": map[string]any{"medium": map[string]any{"url": "https://i.ytimg.com/vi/l1/mqdefault.jpg"}, "maxres": map[string]any{"url": "https://i.ytimg.com/vi/l1/maxresdefault.jpg"}}},
 				"contentDetails": map[string]any{"duration": "PT1H2M3S"}, "statistics": map[string]any{"viewCount": "90"}},
 		}})
 	}
@@ -466,6 +469,10 @@ func TestHistoryPagination(t *testing.T) {
 	if len(items) != 2 || items[0].Kind != "short" || items[1].Kind != "video" || items[1].Text != "Long\n\nDeep dive" ||
 		items[1].Metrics["view_count"] != 90 || items[0].URL != "https://www.youtube.com/watch?v=s1" {
 		t.Errorf("history %+v", items)
+	}
+	if !reflect.DeepEqual(items[0].Visuals, []providers.Visual{{URL: "https://i.ytimg.com/vi/s1/hqdefault.jpg", Cover: true}}) ||
+		!reflect.DeepEqual(items[1].Visuals, []providers.Visual{{URL: "https://i.ytimg.com/vi/l1/maxresdefault.jpg", Cover: true}}) {
+		t.Errorf("visuals %+v %+v", items[0].Visuals, items[1].Visuals)
 	}
 }
 

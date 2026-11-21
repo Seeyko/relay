@@ -243,13 +243,17 @@ func (ig *Instagram) me(ctx context.Context) (string, error) {
 	return id.RemoteUserID, nil
 }
 
-// getFields reads path with fields; on a 400 (a field this login type does not expose) it retries with fallback.
-func (ig *Instagram) getFields(ctx context.Context, path string, q url.Values, fields, fallback string, out any) error {
+// getFields reads path with fields; on a 400 (a field this login type does not expose) it retries with
+// each fallback field set in turn.
+func (ig *Instagram) getFields(ctx context.Context, path string, q url.Values, fields string, fallbacks []string, out any) error {
 	q.Set("fields", fields)
 	err := ig.g.get(ctx, path, q, out)
-	var he *providers.HTTPError
-	if err != nil && fallback != "" && errors.As(err, &he) && he.Status == 400 {
-		q.Set("fields", fallback)
+	for _, fb := range fallbacks {
+		var he *providers.HTTPError
+		if err == nil || fb == "" || !errors.As(err, &he) || he.Status != 400 {
+			break
+		}
+		q.Set("fields", fb)
 		err = ig.g.get(ctx, path, q, out)
 	}
 	return err
@@ -520,7 +524,7 @@ func (ig *Instagram) Metrics(ctx context.Context, ids []string) (map[string]map[
 			CommentsCount int64  `json:"comments_count"`
 			ProductType   string `json:"media_product_type"`
 		}
-		if err := ig.getFields(ctx, "/"+id, url.Values{}, "like_count,comments_count,media_product_type", "like_count,comments_count", &r); err != nil {
+		if err := ig.getFields(ctx, "/"+id, url.Values{}, "like_count,comments_count,media_product_type", []string{"like_count,comments_count"}, &r); err != nil {
 			return out, err
 		}
 		m := map[string]int64{"like_count": r.LikeCount, "reply_count": r.CommentsCount}
@@ -633,6 +637,23 @@ func igKind(mediaType, product string) string {
 	return ""
 }
 
+// igVisual is the image part of an IG media (or of a carousel child). media_url of a VIDEO is the
+// video file, so a video only gives its thumbnail_url. media_url can be missing when the media holds
+// copyrighted material.
+type igVisual struct {
+	MediaType    string `json:"media_type"`
+	MediaURL     string `json:"media_url"`
+	ThumbnailURL string `json:"thumbnail_url"`
+}
+
+func (v igVisual) addTo(it *providers.HistoryItem) {
+	if v.MediaType == "VIDEO" {
+		it.AddVisual(v.ThumbnailURL, true)
+		return
+	}
+	it.AddVisual(v.MediaURL, false)
+}
+
 // History lists the account's feed media and Reels (stories are not returned by /<IG_ID>/media).
 func (ig *Instagram) History(ctx context.Context, since time.Time, max int) ([]providers.HistoryItem, error) {
 	ig.maybeRefresh(ctx)
@@ -644,7 +665,10 @@ func (ig *Instagram) History(ctx context.Context, since time.Time, max int) ([]p
 		max = 5000
 	}
 	const base = "id,caption,media_type,permalink,timestamp,like_count,comments_count"
-	fields := base + ",media_product_type"
+	// Visuals come in the same request: media_url (the image of an IMAGE), thumbnail_url (the cover of a
+	// VIDEO/Reel) and the children of a CAROUSEL_ALBUM.
+	const visuals = base + ",media_url,thumbnail_url,children{media_type,media_url,thumbnail_url}"
+	chain := []string{visuals + ",media_product_type", visuals, base}
 	q := url.Values{"limit": {"100"}}
 	if !since.IsZero() {
 		q.Set("since", fmt.Sprint(since.Unix()))
@@ -655,24 +679,40 @@ func (ig *Instagram) History(ctx context.Context, since time.Time, max int) ([]p
 			Data []struct {
 				ID            string `json:"id"`
 				Caption       string `json:"caption"`
-				MediaType     string `json:"media_type"`
 				ProductType   string `json:"media_product_type"`
 				Permalink     string `json:"permalink"`
 				Timestamp     string `json:"timestamp"`
 				LikeCount     int64  `json:"like_count"`
 				CommentsCount int64  `json:"comments_count"`
+				igVisual
+				Children struct {
+					Data []igVisual `json:"data"`
+				} `json:"children"`
 			} `json:"data"`
 			Paging igPaging `json:"paging"`
 		}
-		if err := ig.getFields(ctx, "/"+uid+"/media", q, fields, base, &r); err != nil {
+		if err := ig.getFields(ctx, "/"+uid+"/media", q, chain[0], chain[1:], &r); err != nil {
 			return out, err
 		}
-		fields = q.Get("fields") // keep the field set that worked
+		for i, f := range chain { // keep the field set that worked
+			if f == q.Get("fields") {
+				chain = chain[i:]
+				break
+			}
+		}
 		for _, m := range r.Data {
 			t, _ := time.Parse(igTimeLayout, m.Timestamp)
-			out = append(out, providers.HistoryItem{RemoteID: m.ID, Text: m.Caption, URL: m.Permalink, CreatedAt: t,
+			it := providers.HistoryItem{RemoteID: m.ID, Text: m.Caption, URL: m.Permalink, CreatedAt: t,
 				Metrics: map[string]int64{"like_count": m.LikeCount, "reply_count": m.CommentsCount},
-				Kind:    igKind(m.MediaType, m.ProductType)})
+				Kind:    igKind(m.MediaType, m.ProductType)}
+			if len(m.Children.Data) > 0 {
+				for _, ch := range m.Children.Data {
+					ch.addTo(&it)
+				}
+			} else {
+				m.igVisual.addTo(&it)
+			}
+			out = append(out, it)
 		}
 		if r.Paging.Next == "" || r.Paging.Cursors.After == "" || len(r.Data) == 0 {
 			break

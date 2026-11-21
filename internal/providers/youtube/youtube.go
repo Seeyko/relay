@@ -479,6 +479,10 @@ type videoResource struct {
 		PublishedAt time.Time `json:"publishedAt"`
 		Title       string    `json:"title"`
 		Description string    `json:"description"`
+		// Thumbnails is keyed by size: default, medium, high, standard, maxres (not all always present).
+		Thumbnails map[string]struct {
+			URL string `json:"url"`
+		} `json:"thumbnails"`
 	} `json:"snippet"`
 	ContentDetails struct {
 		Duration string `json:"duration"`
@@ -976,10 +980,12 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 			if !strings.HasPrefix(text, v.Snippet.Title) {
 				text = strings.TrimSpace(v.Snippet.Title + "\n\n" + text)
 			}
-			out = append(out, providers.HistoryItem{
+			it := providers.HistoryItem{
 				RemoteID: v.ID, Text: text, URL: "https://www.youtube.com/watch?v=" + v.ID,
 				CreatedAt: v.Snippet.PublishedAt.UTC(), Metrics: v.metrics(), Kind: kind(v),
-			})
+			}
+			it.AddVisual(v.thumbnail(), true)
+			out = append(out, it)
 		}
 		// The uploads playlist is newest first: a page with nothing recent ends the walk.
 		if r.NextPageToken == "" || len(r.Items) == 0 || (!since.IsZero() && len(ids) == 0) {
@@ -991,6 +997,17 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 		out = out[:max]
 	}
 	return out, nil
+}
+
+// thumbnail is the largest thumbnail of the snippet (maxres 1280x720 when the channel uploaded a
+// custom one or the video is HD, then standard 640x480, high 480x360, medium 320x180, default).
+func (v videoResource) thumbnail() string {
+	for _, size := range []string{"maxres", "standard", "high", "medium", "default"} {
+		if t := v.Snippet.Thumbnails[size].URL; t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // kind classifies a video. The Data API has no Shorts flag: a video longer than 3 minutes cannot be

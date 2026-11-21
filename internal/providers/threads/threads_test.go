@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -485,11 +486,15 @@ func TestHistory(t *testing.T) {
 			}
 			if q.Get("after") == "" {
 				return `{"data":[{"id":"1","text":"hello","media_type":"TEXT_POST","permalink":"https://t/1","timestamp":"2026-01-02T05:42:03+0000"},` +
-					`{"id":"2","media_type":"CAROUSEL_ALBUM","timestamp":"2026-01-03T00:00:00+0000"},` +
-					`{"id":"3","media_type":"REPOST_FACADE"},{"id":"4","media_type":"TEXT_POST","is_quote_post":true},` +
-					`{"id":"5","media_type":"IMAGE"}],"paging":{"cursors":{"after":"A"}}}`
+					`{"id":"2","media_type":"CAROUSEL_ALBUM","timestamp":"2026-01-03T00:00:00+0000","children":{"data":[` +
+					`{"id":"2a","media_type":"IMAGE","media_url":"https://th.cdn/2a.jpg"},{"id":"2b","media_type":"VIDEO","media_url":"https://th.cdn/2b.mp4","thumbnail_url":"https://th.cdn/2b.jpg"}]}},` +
+					`{"id":"3","media_type":"REPOST_FACADE","media_url":"https://th.cdn/other.jpg"},{"id":"4","media_type":"TEXT_POST","is_quote_post":true},` +
+					`{"id":"5","media_type":"IMAGE","media_url":"https://th.cdn/5.jpg"}],"paging":{"cursors":{"after":"A"}}}`
 			}
-			return `{"data":[{"id":"6","media_type":"VIDEO"}],"paging":{"cursors":{"before":"A"}}}`
+			if q.Get("fields") != "id,text,media_type,permalink,timestamp,media_url,thumbnail_url,children{media_type,media_url,thumbnail_url},is_quote_post" {
+				t.Errorf("fields %q", q.Get("fields"))
+			}
+			return `{"data":[{"id":"6","media_type":"VIDEO","media_url":"https://th.cdn/6.mp4","thumbnail_url":"https://th.cdn/6.jpg"}],"paging":{"cursors":{"before":"A"}}}`
 		},
 	}
 	for _, id := range []string{"1", "2", "4", "5", "6"} { // no insights call for the repost facade (3)
@@ -513,6 +518,19 @@ func TestHistory(t *testing.T) {
 	}
 	if items[0].CreatedAt.IsZero() || items[0].URL != "https://t/1" || items[0].Text != "hello" {
 		t.Fatalf("item %+v", items[0])
+	}
+	wantVis := [][]providers.Visual{
+		nil,
+		{{URL: "https://th.cdn/2a.jpg"}, {URL: "https://th.cdn/2b.jpg", Cover: true}},
+		nil, // a repost shows someone else's post
+		nil,
+		{{URL: "https://th.cdn/5.jpg"}},
+		{{URL: "https://th.cdn/6.jpg", Cover: true}},
+	}
+	for i, w := range wantVis {
+		if !reflect.DeepEqual(items[i].Visuals, w) {
+			t.Errorf("item %s visuals %+v want %+v", items[i].RemoteID, items[i].Visuals, w)
+		}
 	}
 	items, _ = th.History(context.Background(), time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), 2)
 	if len(items) != 2 {

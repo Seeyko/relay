@@ -621,15 +621,34 @@ func (s *Service) ReplyToComment(ctx context.Context, accountID, commentRemoteID
 	return res, nil
 }
 
-// ImportHistory archives past posts of an account (for the "Mon contenu" archive).
-func (s *Service) ImportHistory(ctx context.Context, accountID string, since time.Time, max int) (created, updated int, err error) {
+// ImportOptions tunes ImportHistory.
+type ImportOptions struct {
+	// SkipVisuals imports text and metrics only, without downloading the posts' images.
+	SkipVisuals bool
+}
+
+// ImportResult counts what an import did.
+type ImportResult struct {
+	Created int `json:"created"`
+	Updated int `json:"updated"`
+	// Visuals is the number of images downloaded into the media library.
+	Visuals int `json:"visuals"`
+	// VisualsFailed is the number of images that could not be downloaded (see the log).
+	VisualsFailed int `json:"visuals_failed,omitempty"`
+}
+
+// ImportHistory archives past posts of an account (for the "Mon contenu" archive). Each imported post
+// also gets its visuals (photos, video covers) copied into the media library, once: a re-import fills
+// the imported posts that have none yet, and never touches posts created in Relay.
+func (s *Service) ImportHistory(ctx context.Context, accountID string, since time.Time, max int, opts ImportOptions) (ImportResult, error) {
+	var res ImportResult
 	acc, err := s.Store.GetAccount(ctx, accountID)
 	if err != nil {
-		return 0, 0, err
+		return res, err
 	}
 	cl, err := s.client(ctx, acc)
 	if err != nil {
-		return 0, 0, err
+		return res, err
 	}
 	items, herr := cl.History(ctx, since, max)
 	for _, it := range items {
@@ -640,18 +659,127 @@ func (s *Service) ImportHistory(ctx context.Context, accountID string, since tim
 		}
 		isNew, err := s.Store.UpsertImported(ctx, p)
 		if err != nil {
-			return created, updated, err
+			return res, err
 		}
 		if err := s.Store.AddPostSnapshot(ctx, p.ID, s.now(), it.Metrics); err != nil {
-			return created, updated, err
+			return res, err
 		}
 		if isNew {
-			created++
+			res.Created++
 		} else {
-			updated++
+			res.Updated++
+		}
+		if !opts.SkipVisuals && p.Source == "imported" && len(p.Media) == 0 && len(it.Visuals) > 0 {
+			ok, failed := s.importVisuals(ctx, acc, p.ID, it)
+			res.Visuals += ok
+			res.VisualsFailed += failed
 		}
 	}
-	return created, updated, herr
+	return res, herr
+}
+
+const (
+	// maxVisuals caps the images kept per imported post.
+	maxVisuals = 10
+	// maxVisualSize skips larger images (the networks serve display-size images well below this).
+	maxVisualSize = 15 << 20
+	visualTimeout = time.Minute
+)
+
+// importVisuals downloads the visuals of an imported post into the media library and attaches them.
+// Best effort: a failed download is logged and skipped, it never fails the import.
+func (s *Service) importVisuals(ctx context.Context, acc *store.Account, postID string, it providers.HistoryItem) (ok, failed int) {
+	vis := it.Visuals
+	if len(vis) > maxVisuals {
+		vis = vis[:maxVisuals]
+	}
+	var ids []string
+	for i, v := range vis {
+		name := fmt.Sprintf("%s-%s-%d", acc.Provider, safeName(it.RemoteID), i+1)
+		m, err := s.saveVisual(ctx, v.URL, name)
+		if err != nil {
+			failed++
+			s.Log.Warn("import: visual download failed", "account", acc.ID, "post", postID, "remote_id", it.RemoteID, "err", err)
+			continue
+		}
+		ids = append(ids, m.ID)
+	}
+	if len(ids) == 0 {
+		return 0, failed
+	}
+	set, err := s.Store.SetImportedMedia(ctx, postID, ids)
+	if err != nil || !set {
+		// Another import attached media in the meantime: drop ours, keep theirs.
+		for _, id := range ids {
+			s.deleteMedia(ctx, id)
+		}
+		if err != nil {
+			s.Log.Warn("import: attach visuals", "post", postID, "err", err)
+		}
+		return 0, failed
+	}
+	return len(ids), failed
+}
+
+// saveVisual downloads one image (never a video) of at most maxVisualSize into the media library.
+// The network URLs are signed and expire, so Relay keeps its own copy instead of the link.
+func (s *Service) saveVisual(ctx context.Context, rawURL, name string) (*store.Media, error) {
+	if !strings.HasPrefix(rawURL, "https://") && !strings.HasPrefix(rawURL, "http://") {
+		return nil, fmt.Errorf("not an http(s) url")
+	}
+	ctx, cancel := context.WithTimeout(ctx, visualTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	if resp.ContentLength > maxVisualSize {
+		return nil, fmt.Errorf("image larger than %d MB", maxVisualSize>>20)
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxVisualSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxVisualSize {
+		return nil, fmt.Errorf("image larger than %d MB", maxVisualSize>>20)
+	}
+	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if !strings.HasPrefix(mt, "image/") {
+		// CDNs sometimes answer application/octet-stream (or nothing): trust the bytes.
+		mt = http.DetectContentType(b)
+	}
+	ext, ok := imageExt[mt]
+	if !ok {
+		return nil, fmt.Errorf("not an image (%s)", mt)
+	}
+	return s.SaveMedia(ctx, bytes.NewReader(b), name+ext, mt)
+}
+
+var imageExt = map[string]string{
+	"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp",
+	"image/heic": ".heic", "image/heif": ".heif", "image/avif": ".avif",
+}
+
+// safeName keeps a remote id usable in a file name (LinkedIn ids are URNs with colons).
+func safeName(id string) string {
+	b := []byte(id)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			b[i] = '-'
+		}
+	}
+	if len(b) > 64 {
+		b = b[len(b)-64:]
+	}
+	return string(b)
 }
 
 func (s *Service) accounts(ctx context.Context, id string) ([]*store.Account, error) {
@@ -799,6 +927,22 @@ func (s *Service) SaveMedia(ctx context.Context, r io.Reader, filename, mimeType
 		f.Close()
 	}
 	return m, s.Store.CreateMedia(ctx, m)
+}
+
+// deleteMedia removes a media file (disk or bucket) and its row. Best effort.
+func (s *Service) deleteMedia(ctx context.Context, id string) {
+	m, err := s.Store.GetMedia(ctx, id)
+	if err != nil {
+		return
+	}
+	if m.InBucket() {
+		if s.Blob != nil {
+			_ = s.Blob.Delete(ctx, m.Key())
+		}
+	} else {
+		_ = os.Remove(m.Path)
+	}
+	_ = s.Store.DeleteMedia(ctx, id)
 }
 
 // OpenMedia reads a media file from disk or from the bucket.

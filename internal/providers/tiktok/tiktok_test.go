@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -402,7 +403,7 @@ func TestMetricsAndHistory(t *testing.T) {
 	f.on("POST /v2/video/list/", func(w http.ResponseWriter, h hit) {
 		page++
 		if page == 1 {
-			ok(`{"videos":[{"id":"2","title":"t2","video_description":"d2","create_time":1700000200,"share_url":"https://www.tiktok.com/@h/video/2","view_count":9}],"cursor":1700000200000,"has_more":true}`)(w, h)
+			ok(`{"videos":[{"id":"2","title":"t2","video_description":"d2","create_time":1700000200,"share_url":"https://www.tiktok.com/@h/video/2","view_count":9,"cover_image_url":"https://p16-sign.tiktokcdn.com/2.jpeg?x-expires=1"}],"cursor":1700000200000,"has_more":true}`)(w, h)
 			return
 		}
 		ok(`{"videos":[{"id":"1","title":"t1","create_time":1700000100},{"id":"0","create_time":1600000000}],"cursor":1600000000000,"has_more":true}`)(w, h)
@@ -434,7 +435,13 @@ func TestMetricsAndHistory(t *testing.T) {
 	if len(items) != 2 || items[0].RemoteID != "2" || items[0].Text != "d2" || items[1].Text != "t1" || items[0].Kind != "video" || items[0].Metrics["view_count"] != 9 {
 		t.Errorf("items %+v", items)
 	}
+	if want := []providers.Visual{{URL: "https://p16-sign.tiktokcdn.com/2.jpeg?x-expires=1", Cover: true}}; !reflect.DeepEqual(items[0].Visuals, want) || items[1].Visuals != nil {
+		t.Errorf("visuals %+v %+v", items[0].Visuals, items[1].Visuals)
+	}
 	l := f.find("POST /v2/video/list/")
+	if l[0].Query != "fields="+videoFields+",cover_image_url" {
+		t.Errorf("list query %q", l[0].Query)
+	}
 	if b := jsonOf(t, l[0].Body); b["max_count"] != 20.0 || b["cursor"] != nil {
 		t.Errorf("first page %v", b)
 	}

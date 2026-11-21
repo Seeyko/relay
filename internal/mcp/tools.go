@@ -611,14 +611,18 @@ func BuildTools(svc *core.Service) []Tool {
 			},
 		},
 		{
-			Name:        "import_history",
-			Description: "Import an account's past posts (with metrics) into Relay's archive, e.g. for the 'Mon contenu' page. Re-running only refreshes metrics.",
-			InputSchema: obj(map[string]any{"account_id": str(""), "since": str("RFC3339, optional"), "max": num("default: everything the API allows")}, "account_id"),
+			Name: "import_history",
+			Description: "Import an account's past posts (with metrics and visuals) into Relay's archive, e.g. for the 'Mon contenu' page. " +
+				"Each post's images (photos, video covers) are copied into the media library. Re-running refreshes metrics and fills the visuals " +
+				"of imported posts that have none yet (backfill); posts created in Relay are never changed.",
+			InputSchema: obj(map[string]any{"account_id": str(""), "since": str("RFC3339, optional"), "max": num("default: everything the API allows"),
+				"visuals": map[string]any{"type": "boolean", "description": "download the posts' images (default true)"}}, "account_id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct {
 					AccountID string `json:"account_id"`
 					Since     string `json:"since"`
 					Max       int    `json:"max"`
+					Visuals   *bool  `json:"visuals"`
 				}](raw)
 				if err != nil {
 					return nil, err
@@ -629,8 +633,7 @@ func BuildTools(svc *core.Service) []Tool {
 						return nil, err
 					}
 				}
-				c, u, err := svc.ImportHistory(ctx, a.AccountID, since, a.Max)
-				return map[string]int{"created": c, "updated": u}, err
+				return svc.ImportHistory(ctx, a.AccountID, since, a.Max, core.ImportOptions{SkipVisuals: a.Visuals != nil && !*a.Visuals})
 			},
 		},
 		{

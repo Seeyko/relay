@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -291,7 +292,7 @@ func TestHistoryKinds(t *testing.T) {
 			{"id":"5","text":"pic","attachments":{"media_keys":["3_1","3_2"]}},
 			{"id":"6","text":"clip","attachments":{"media_keys":["7_1"]}},
 			{"id":"7","text":"gif","attachments":{"media_keys":["16_1"]}}],
-			"includes":{"media":[{"media_key":"3_1","type":"photo"},{"media_key":"3_2","type":"photo"},{"media_key":"7_1","type":"video","public_metrics":{"view_count":12}},{"media_key":"16_1","type":"animated_gif"}]},
+			"includes":{"media":[{"media_key":"3_1","type":"photo","url":"https://pbs.twimg.com/media/A.jpg"},{"media_key":"3_2","type":"photo","url":"https://pbs.twimg.com/media/B.png"},{"media_key":"7_1","type":"video","preview_image_url":"https://pbs.twimg.com/ext_tw_video_thumb/7/pu/img/C.jpg","public_metrics":{"view_count":12}},{"media_key":"16_1","type":"animated_gif","preview_image_url":"https://pbs.twimg.com/tweet_video_thumb/D.jpg"}]},
 			"meta":{"result_count":7}}`))
 	})
 	got, err := c.History(context.Background(), time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), 0)
@@ -310,10 +311,21 @@ func TestHistoryKinds(t *testing.T) {
 	if got[5].Metrics["video_view_count"] != 12 || got[0].URL != "https://x.com/alice/status/1" {
 		t.Fatalf("item %+v", got[5])
 	}
+	wantVis := map[int][]providers.Visual{
+		0: nil,
+		4: {{URL: "https://pbs.twimg.com/media/A.jpg?name=medium"}, {URL: "https://pbs.twimg.com/media/B.png?name=medium"}},
+		5: {{URL: "https://pbs.twimg.com/ext_tw_video_thumb/7/pu/img/C.jpg", Cover: true}},
+		6: {{URL: "https://pbs.twimg.com/tweet_video_thumb/D.jpg", Cover: true}},
+	}
+	for i, w := range wantVis {
+		if !reflect.DeepEqual(got[i].Visuals, w) {
+			t.Errorf("item %s visuals %+v want %+v", got[i].RemoteID, got[i].Visuals, w)
+		}
+	}
 	cl := (*calls)[0]
 	q := cl.Query
 	if cl.Path != "/2/users/42/tweets" || q.Get("max_results") != "100" || q.Get("start_time") != "2026-10-01T00:00:00Z" ||
-		q.Get("tweet.fields") != "created_at,public_metrics,referenced_tweets,attachments" || q.Get("expansions") != "attachments.media_keys" || q.Get("media.fields") != "type,public_metrics" {
+		q.Get("tweet.fields") != "created_at,public_metrics,referenced_tweets,attachments" || q.Get("expansions") != "attachments.media_keys" || q.Get("media.fields") != "type,public_metrics,url,preview_image_url" {
 		t.Fatalf("query %s %v", cl.Path, q)
 	}
 }
