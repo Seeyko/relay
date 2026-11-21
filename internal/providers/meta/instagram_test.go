@@ -113,6 +113,7 @@ func TestInstagramPublishImage(t *testing.T) {
 		"GET /v26.0/c1":                 static(`{"status_code":"FINISHED"}`),
 		"POST /v26.0/ig1/media_publish": static(`{"id":"m1"}`),
 		"GET /v26.0/m1":                 static(`{"permalink":"https://www.instagram.com/p/abc/"}`),
+		"POST /v26.0/m1/comments":       static(`{"id":"k1"}`),
 	})
 	ig := newTestIG(t, f, nil, nil)
 	img := jpeg("a.jpg")
@@ -122,11 +123,13 @@ func TestInstagramPublishImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.RemoteID != "m1" || res.URL != "https://www.instagram.com/p/abc/" {
+	if res.RemoteID != "m1" || res.URL != "https://www.instagram.com/p/abc/" || !reflect.DeepEqual(res.RemoteIDs, []string{"m1", "k1"}) {
 		t.Fatalf("result %+v", res)
 	}
+	// Part 1 is the caption, part 2 the first comment (they used to be joined into the caption).
+	expect(t, f.form("POST /v26.0/m1/comments", 0), map[string]string{"message": "world"})
 	c := f.form("POST /v26.0/ig1/media", 0)
-	expect(t, c, map[string]string{"image_url": "https://relay.example/media/a.jpg", "caption": "hello\n\nworld", "alt_text": "a cat",
+	expect(t, c, map[string]string{"image_url": "https://relay.example/media/a.jpg", "caption": "hello", "alt_text": "a cat",
 		"location_id": "123", "collaborators": `["bob"]`, "media_type": ""})
 	expect(t, f.form("GET /v26.0/c1", 0), map[string]string{"fields": "status_code,status"})
 	expect(t, f.form("POST /v26.0/ig1/media_publish", 0), map[string]string{"creation_id": "c1"})

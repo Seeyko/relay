@@ -201,7 +201,7 @@ func TestThreadResume(t *testing.T) {
 		w.Write([]byte(`{"data":{"id":"t` + string(rune('0'+c)) + `"}}`))
 	}))
 	ctx := context.Background()
-	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: []string{"one", "two", "three"}})
+	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: core.TextThread("one", "two", "three")})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -34,9 +35,36 @@ type MediaFile struct {
 
 // PublishRequest is one post (or thread) for one account.
 type PublishRequest struct {
-	Parts   []string // len > 1 means a thread
-	Media   []MediaFile
-	Options map[string]any
+	Parts []string // len > 1 means a thread
+	// Media is the media of the first part (backward compatible: connectors that only know one
+	// set of media read this).
+	Media []MediaFile
+	// PartMedia is the media of every part, aligned with Parts (PartMedia[0] is Media). It is nil or
+	// shorter than Parts when the later parts have no media. Read it through MediaOf.
+	PartMedia [][]MediaFile
+	Options   map[string]any
+}
+
+// MediaOf returns the media of part i (0 is the first part).
+func (r PublishRequest) MediaOf(i int) []MediaFile {
+	if i == 0 {
+		return r.Media
+	}
+	if i > 0 && i < len(r.PartMedia) {
+		return r.PartMedia[i]
+	}
+	return nil
+}
+
+// LaterMedia returns the number of the first part after the first one that has media (2 for the second
+// part), or 0 when only the first part has media.
+func (r PublishRequest) LaterMedia() int {
+	for i := 1; i < len(r.Parts) && i < len(r.PartMedia); i++ {
+		if len(r.PartMedia[i]) > 0 {
+			return i + 1
+		}
+	}
+	return 0
 }
 
 type PublishResult struct {
@@ -132,10 +160,36 @@ type Factory struct {
 	// Validate checks a post before it is scheduled (character limits, required media...).
 	// It returns human-readable problems; nil means OK. Optional.
 	Validate func(req PublishRequest) []string
+	// MediaPerPart says the connector attaches media to every part of a thread (X, Threads). Without it,
+	// a later part with media is refused before publishing (its comments or replies are text only).
+	MediaPerPart bool
 	// Count (optional) counts characters the way the network does for its text limit (default CharCount).
 	// The dashboard preview uses it for its counters.
 	Count func(text string) int
 }
+
+// DocumentTitle is the title of a document post built from images (LinkedIn options.images_as_document):
+// options.document_title, else the first line of the first part, cut to 100 characters.
+func DocumentTitle(opts map[string]any, parts []string) string {
+	t, _ := opts["document_title"].(string)
+	t = strings.TrimSpace(t)
+	if t == "" && len(parts) > 0 {
+		t = strings.TrimSpace(parts[0])
+		if i := strings.IndexByte(t, '\n'); i >= 0 {
+			t = strings.TrimSpace(t[:i])
+		}
+		if r := []rune(t); len(r) > MaxDocumentTitle {
+			t = strings.TrimSpace(string(r[:MaxDocumentTitle]))
+		}
+	}
+	if t == "" {
+		t = "Document"
+	}
+	return t
+}
+
+// MaxDocumentTitle is the longest title Relay gives a document post.
+const MaxDocumentTitle = 100
 
 // CharCount counts characters the way most networks do (Unicode code points).
 func CharCount(s string) int { return len([]rune(s)) }

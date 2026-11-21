@@ -229,6 +229,25 @@
 .li-ctext { white-space: pre-wrap; word-break: break-word; }
 .li-cact { padding: 4px 8px 0; color: var(--mut); font-size: 12px; font-weight: 600; }
 
+.li-doc { border-block: 1px solid var(--line); background: var(--chip); }
+.li-doc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; font-size: 13px; }
+.li-doc-head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.li-doc-page { flex: none; padding: 1px 8px; border-radius: 10px; background: rgb(0 0 0 / .6); color: #fff; font-size: 12px; font-weight: 600; }
+.li-doc-track { display: flex; width: 100%; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; aspect-ratio: 4 / 5; }
+.li-doc-track::-webkit-scrollbar { display: none; }
+.li-doc-track img { object-fit: contain; }
+
+/* ---------- Facebook and Instagram: parts 2..n as comments of the account ---------- */
+.mc-list { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 4px; }
+.mc-row { display: flex; gap: 8px; align-items: flex-start; }
+.mc-col { flex: 1; min-width: 0; }
+.mc-fb .mc-bubble { display: inline-block; max-width: 100%; padding: 8px 12px; border-radius: 18px; background: var(--chip); }
+.mc-name { display: block; font-size: 13px; }
+.mc-text { white-space: pre-wrap; word-break: break-word; }
+.mc-ig .mc-text { font-size: 14px; }
+.mc-act { padding: 3px 12px 0 0; color: var(--mut); font-size: 12px; font-weight: 600; }
+.mc-fb .mc-act { padding-left: 12px; }
+
 /* ---------- YouTube ---------- */
 .nw-yt { --bg: #fff; --ink: #0f0f0f; --mut: #606060; --line: #e5e5e5; --lk: #065fd4; --chip: rgb(0 0 0 / .05); font-size: 14px; line-height: 20px; font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif; }
 .yt-player { position: relative; aspect-ratio: 16 / 9; background: #000; }

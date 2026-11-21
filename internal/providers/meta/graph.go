@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -17,6 +18,39 @@ import (
 )
 
 const DefaultVersion = "v26.0"
+
+// commentTarget is the object the parts are commented on instead of creating a post: the first post of a
+// thread being resumed (options.thread_root, set by the scheduler), or options.reply_to.
+func commentTarget(o map[string]any) string {
+	if v, _ := o["thread_root"].(string); v != "" {
+		return v
+	}
+	v, _ := o["reply_to"].(string)
+	return v
+}
+
+// partial returns res when it holds ids (some comments were posted), else nil.
+func partial(res *providers.PublishResult) *providers.PublishResult {
+	if len(res.RemoteIDs) == 0 {
+		return nil
+	}
+	res.RemoteID = res.RemoteIDs[0]
+	return res
+}
+
+// commentProblems checks thread parts 2..n, which Facebook and Instagram publish as comments.
+func commentProblems(parts []string, limit int, network string) []string {
+	var errs []string
+	for i := 1; i < len(parts); i++ {
+		if strings.TrimSpace(parts[i]) == "" {
+			errs = append(errs, fmt.Sprintf("part %d is empty (parts after the first are posted as comments)", i+1))
+		}
+		if n := providers.CharCount(parts[i]); n > limit {
+			errs = append(errs, fmt.Sprintf("part %d becomes a %s comment, limited to %d characters (got %d)", i+1, network, limit, n))
+		}
+	}
+	return errs
+}
 
 // graph is a tiny Graph API client authenticated with one access token.
 type graph struct {

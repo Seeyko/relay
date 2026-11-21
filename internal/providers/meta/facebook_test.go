@@ -53,10 +53,16 @@ func TestFacebookPublishTextAndLink(t *testing.T) {
 		}
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/v26.0/123/feed":
-			if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.FormValue("message") != "a\n\nb" || r.FormValue("link") != "https://ex.com" {
+			// Part 1 is the post; part 2 becomes a comment (it used to be joined into the message).
+			if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" || r.FormValue("message") != "a" || r.FormValue("link") != "https://ex.com" {
 				t.Errorf("feed form: %v", r.Form)
 			}
 			w.Write([]byte(`{"id":"123_9"}`))
+		case r.Method == "POST" && r.URL.Path == "/v26.0/123_9/comments":
+			if r.FormValue("message") != "b" {
+				t.Errorf("comment form: %v", r.Form)
+			}
+			w.Write([]byte(`{"id":"9_77"}`))
 		case r.URL.Path == "/v26.0/123_9" && r.URL.Query().Get("fields") == "permalink_url":
 			w.Write([]byte(`{"permalink_url":"https://www.facebook.com/123/posts/9"}`))
 		default:
@@ -64,7 +70,7 @@ func TestFacebookPublishTextAndLink(t *testing.T) {
 		}
 	})
 	res, err := fb.Publish(context.Background(), providers.PublishRequest{Parts: []string{"a", "b"}, Options: map[string]any{"link": "https://ex.com"}})
-	if err != nil || res.RemoteID != "123_9" || res.URL != "https://www.facebook.com/123/posts/9" {
+	if err != nil || res.RemoteID != "123_9" || res.URL != "https://www.facebook.com/123/posts/9" || !reflect.DeepEqual(res.RemoteIDs, []string{"123_9", "9_77"}) {
 		t.Fatalf("%v %+v", err, res)
 	}
 }

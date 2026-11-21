@@ -19,6 +19,8 @@ import (
 // Limits from the Graph API reference.
 const (
 	fbMaxText = 63206
+	// Comment messages are limited to 8000 characters.
+	fbMaxComment = 8000
 	// https://developers.facebook.com/docs/graph-api/reference/page/photos/ : 10 MB, jpeg/bmp/png/gif/tiff.
 	fbMaxPhoto = 10 << 20
 	// Videos above this size use the documented chunked upload (upload_phase=start/transfer/finish)
@@ -37,7 +39,8 @@ func init() {
 		Name: "facebook",
 		Description: "Facebook Page via Graph API with a Page access token " +
 			"(pages_show_list, pages_manage_posts, pages_read_engagement, pages_read_user_content, pages_manage_engagement; read_insights for views/reach/clicks). " +
-			"Text, link (options.link), photos (up to 10 MB each, multi-photo posts), one video (options.title), Reels (options.reel=true, MP4 9:16, 3-90 s); " +
+			"Text, link (options.link), photos (up to 10 MB each, multi-photo posts), one video (options.title), Reels (options.reel=true, MP4 9:16, 3-90 s). " +
+			"Thread parts: part 1 is the post, parts 2..n are published right after as comments of the Page on it, in order (text only, 8000 characters each); " +
 			"reactions/comments/shares + post insights; comment replies; history import.",
 		CredentialFields: []string{"page_id", "page_access_token"},
 		Validate:         fbValidate,
@@ -75,12 +78,17 @@ func init() {
 
 func fbValidate(req providers.PublishRequest) []string {
 	var errs []string
-	if n := providers.CharCount(strings.Join(req.Parts, "\n\n")); n > fbMaxText {
+	first := ""
+	if len(req.Parts) > 0 {
+		first = req.Parts[0]
+	}
+	if n := providers.CharCount(first); n > fbMaxText {
 		errs = append(errs, fmt.Sprintf("Facebook posts are limited to %d characters (got %d)", fbMaxText, n))
 	}
-	if strings.TrimSpace(strings.Join(req.Parts, "")) == "" && len(req.Media) == 0 && req.Options["link"] == nil {
+	if strings.TrimSpace(first) == "" && len(req.Media) == 0 && req.Options["link"] == nil {
 		errs = append(errs, "empty post")
 	}
+	errs = append(errs, commentProblems(req.Parts, fbMaxComment, "Facebook")...)
 	videos := 0
 	for _, m := range req.Media {
 		switch {
@@ -160,8 +168,22 @@ func (f *Facebook) permalink(ctx context.Context, id, fallback string) string {
 	return fallback
 }
 
+// Publish posts part 1 (with the media), then parts 2..n as comments of the Page on that post.
+// With options.thread_root (a resumed thread) or options.reply_to, every part is a comment on that object.
 func (f *Facebook) Publish(ctx context.Context, req providers.PublishRequest) (*providers.PublishResult, error) {
-	msg := strings.Join(req.Parts, "\n\n")
+	if to := commentTarget(req.Options); to != "" {
+		if len(req.Media) > 0 {
+			return nil, providers.Invalid("facebook: comments are text only")
+		}
+		return f.comments(ctx, to, req.Parts)
+	}
+	if req.LaterMedia() > 0 {
+		return nil, providers.Invalid("facebook: comments are text only")
+	}
+	msg := ""
+	if len(req.Parts) > 0 {
+		msg = req.Parts[0]
+	}
 	title, _ := req.Options["title"].(string)
 	var id, fallback string
 	var err error
@@ -202,7 +224,39 @@ func (f *Facebook) Publish(ctx context.Context, req providers.PublishRequest) (*
 	if fallback == "" {
 		fallback = "https://www.facebook.com/" + id
 	}
-	return &providers.PublishResult{RemoteID: id, RemoteIDs: []string{id}, URL: f.permalink(ctx, id, fallback)}, nil
+	res := &providers.PublishResult{RemoteID: id, RemoteIDs: []string{id}, URL: f.permalink(ctx, id, fallback)}
+	if len(req.Parts) > 1 {
+		more, err := f.comments(ctx, id, req.Parts[1:])
+		if more != nil {
+			res.RemoteIDs = append(res.RemoteIDs, more.RemoteIDs...)
+		}
+		if err != nil {
+			return res, fmt.Errorf("facebook: post published, comment %d/%d failed: %w", len(res.RemoteIDs), len(req.Parts)-1, err)
+		}
+	}
+	return res, nil
+}
+
+// comments posts each text as a comment of the Page on the object to (POST /{object-id}/comments).
+func (f *Facebook) comments(ctx context.Context, to string, texts []string) (*providers.PublishResult, error) {
+	res := &providers.PublishResult{}
+	for _, t := range texts {
+		if strings.TrimSpace(t) == "" {
+			return partial(res), providers.Invalid("facebook: empty comment")
+		}
+		var r idResp
+		if err := f.g.post(ctx, "/"+to+"/comments", url.Values{"message": {t}}, &r); err != nil {
+			return partial(res), err
+		}
+		if r.ID == "" {
+			return partial(res), errors.New("facebook: empty comment id in response")
+		}
+		res.RemoteIDs = append(res.RemoteIDs, r.ID)
+	}
+	if len(res.RemoteIDs) > 0 {
+		res.RemoteID = res.RemoteIDs[0]
+	}
+	return res, nil
 }
 
 func photoFields(m providers.MediaFile, fields map[string]string) map[string]string {

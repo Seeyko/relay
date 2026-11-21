@@ -32,7 +32,8 @@ const (
 func init() {
 	providers.Register(providers.Factory{
 		Name:             "x",
-		Description:      "X / Twitter via API v2 (OAuth 1.0a user context). Publishing, threads, images/videos, metrics, replies, history import.",
+		Description:      "X / Twitter via API v2 (OAuth 1.0a user context). Publishing, threads (each part can carry its own media: up to 4 images or 1 video/GIF), images/videos, metrics, replies, history import.",
+		MediaPerPart:     true,
 		CredentialFields: []string{"consumer_key", "consumer_secret", "access_token", "access_token_secret"},
 		Validate:         validate,
 		Count:            WeightedLength,
@@ -73,12 +74,22 @@ func validate(req providers.PublishRequest) []string {
 		if n := WeightedLength(p); n > limit {
 			errs = append(errs, fmt.Sprintf("part %d is %d characters (X limit %d, links count as 23)", i+1, n, limit))
 		}
-		if strings.TrimSpace(p) == "" && !(i == 0 && len(req.Media) > 0) {
+		if strings.TrimSpace(p) == "" && len(req.MediaOf(i)) == 0 {
 			errs = append(errs, fmt.Sprintf("part %d is empty", i+1))
 		}
 	}
+	errs = append(errs, validateMedia(req.Media, "")...)
+	for i := 1; i < len(req.Parts); i++ {
+		errs = append(errs, validateMedia(req.MediaOf(i), fmt.Sprintf("part %d: ", i+1))...)
+	}
+	return errs
+}
+
+// validateMedia checks the media of one post: up to 4 images, or one video or GIF.
+func validateMedia(list []providers.MediaFile, prefix string) []string {
+	var errs []string
 	videos := 0
-	for _, m := range req.Media {
+	for _, m := range list {
 		switch cat := mediaCategory(m.Mime); {
 		case cat == "tweet_video":
 			videos++
@@ -96,11 +107,14 @@ func validate(req providers.PublishRequest) []string {
 			errs = append(errs, fmt.Sprintf("%s is larger than X's 5 MB image limit", m.Filename))
 		}
 	}
-	if len(req.Media) > 4 {
+	if len(list) > 4 {
 		errs = append(errs, "X allows at most 4 media per post")
 	}
-	if videos > 0 && len(req.Media) > 1 {
+	if videos > 0 && len(list) > 1 {
 		errs = append(errs, "a video or GIF must be the only media of an X post")
+	}
+	for i := range errs {
+		errs[i] = prefix + errs[i]
 	}
 	return errs
 }
@@ -311,22 +325,26 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 	if c.username == "" {
 		_, _ = c.Identify(ctx) // best effort, for nice URLs
 	}
-	var mediaIDs []string
-	for _, m := range req.Media {
-		id, err := c.UploadMedia(ctx, m)
-		if err != nil {
-			return nil, fmt.Errorf("x: media %s: %w", m.Filename, err)
+	// Upload every part's media before the first post, so a bad file never leaves half a thread.
+	// Media ids stay valid for 24 hours, far longer than a thread takes.
+	mediaIDs := make([][]string, len(req.Parts))
+	for i := range req.Parts {
+		list := req.MediaOf(i)
+		if len(list) > 4 {
+			return nil, providers.Invalid(fmt.Sprintf("x: part %d has %d media (at most 4)", i+1, len(list)))
 		}
-		mediaIDs = append(mediaIDs, id)
+		for _, m := range list {
+			id, err := c.UploadMedia(ctx, m)
+			if err != nil {
+				return nil, fmt.Errorf("x: media %s: %w", m.Filename, err)
+			}
+			mediaIDs[i] = append(mediaIDs[i], id)
+		}
 	}
 	replyTo, _ := req.Options["reply_to"].(string)
 	res := &providers.PublishResult{}
 	for i, part := range req.Parts {
-		var mids []string
-		if i == 0 {
-			mids = mediaIDs
-		}
-		id, err := c.createTweet(ctx, part, mids, replyTo)
+		id, err := c.createTweet(ctx, part, mediaIDs[i], replyTo)
 		if err != nil {
 			if i > 0 {
 				return res, fmt.Errorf("x: thread stopped at part %d/%d: %w", i+1, len(req.Parts), err)

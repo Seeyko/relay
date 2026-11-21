@@ -171,11 +171,78 @@ func (s *Service) client(ctx context.Context, acc *store.Account) (providers.Cli
 
 // ---------- posts ----------
 
+// ThreadPart is one part of a thread. In JSON it is a string (text only) or {"text": "...", "media": ["med_..."]}.
+type ThreadPart struct {
+	Text  string   `json:"text"`
+	Media []string `json:"media,omitempty"`
+}
+
+func (tp *ThreadPart) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*tp = ThreadPart{Text: s}
+		return nil
+	}
+	var o struct {
+		Text  *string  `json:"text"`
+		Media []string `json:"media"`
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&o); err != nil {
+		return fmt.Errorf("a thread part is a string or {\"text\": \"...\", \"media\": [\"med_...\"]}: %v", err)
+	}
+	*tp = ThreadPart{Media: o.Media}
+	if o.Text != nil {
+		tp.Text = *o.Text
+	}
+	return nil
+}
+
+// Thread is a list of parts; each one may carry its own media.
+type Thread []ThreadPart
+
+// TextThread builds a thread of text-only parts.
+func TextThread(texts ...string) Thread {
+	t := make(Thread, len(texts))
+	for i, s := range texts {
+		t[i] = ThreadPart{Text: s}
+	}
+	return t
+}
+
+func (t Thread) texts() []string {
+	out := make([]string, len(t))
+	for i, p := range t {
+		out[i] = p.Text
+	}
+	return out
+}
+
+// partMedia resolves the media of every part. top is the top-level media field: it is the media of
+// part 1, unless thread[0] carries its own (giving both is an error).
+func (t Thread) partMedia(top []string) ([][]string, error) {
+	if len(t) == 0 {
+		return [][]string{top}, nil
+	}
+	if len(t[0].Media) > 0 && len(top) > 0 {
+		return nil, invalid("media is given twice for part 1: use either the top-level media or thread[0].media")
+	}
+	out := make([][]string, len(t))
+	for i, p := range t {
+		out[i] = p.Media
+	}
+	if len(out[0]) == 0 {
+		out[0] = top
+	}
+	return out, nil
+}
+
 type ScheduleInput struct {
 	AccountIDs  []string       `json:"account_ids"`
 	Text        string         `json:"text"`
-	Thread      []string       `json:"thread"` // alternative to text: several parts
-	Media       []string       `json:"media"`
+	Thread      Thread         `json:"thread"`       // alternative to text: several parts, strings or {text, media}
+	Media       []string       `json:"media"`        // media of the first part
 	ScheduledAt string         `json:"scheduled_at"` // RFC3339; empty = now; "draft" = keep as draft
 	Options     map[string]any `json:"options"`
 	// PerAccount overrides text per account id (e.g. shorter version for X).
@@ -189,7 +256,7 @@ type ScheduleInput struct {
 
 func (in *ScheduleInput) parts() []string {
 	if len(in.Thread) > 0 {
-		return in.Thread
+		return in.Thread.texts()
 	}
 	if strings.TrimSpace(in.Text) == "" {
 		return nil
@@ -231,10 +298,12 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 		}
 		planned = &t
 	}
-	for _, m := range in.Media {
-		if _, err := s.Store.GetMedia(ctx, m); err != nil {
-			return nil, invalid("unknown media %q", m)
-		}
+	partMedia, err := in.Thread.partMedia(in.Media)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.checkMedia(ctx, partMedia); err != nil {
+		return nil, err
 	}
 	accs := make([]*store.Account, 0, len(in.AccountIDs))
 	for _, id := range in.AccountIDs {
@@ -244,7 +313,7 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 		}
 		accs = append(accs, a)
 	}
-	files, err := s.mediaFiles(ctx, in.Media)
+	files, err := s.partFiles(ctx, partMedia)
 	if err != nil {
 		return nil, err
 	}
@@ -275,8 +344,9 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 		for k, v := range in.Options {
 			opts[k] = v
 		}
-		opts["kind"] = kindOf(plan[a.ID], files, opts)
-		p := &store.Post{GroupID: group, AccountID: a.ID, Status: status, Parts: plan[a.ID], Media: in.Media, Options: opts, ScheduledAt: at, PlannedAt: planned}
+		opts["kind"] = kindOf(plan[a.ID], files[0], opts)
+		// With a per_account text (a single part) the store drops the media of the later parts.
+		p := &store.Post{GroupID: group, AccountID: a.ID, Status: status, Parts: plan[a.ID], Media: partMedia[0], PartMedia: partMedia, Options: opts, ScheduledAt: at, PlannedAt: planned}
 		if err := s.Store.CreatePost(ctx, p); err != nil {
 			return nil, err
 		}
@@ -288,8 +358,8 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 
 type UpdateInput struct {
 	Text        *string        `json:"text"`
-	Thread      []string       `json:"thread"`
-	Media       []string       `json:"media"`
+	Thread      Thread         `json:"thread"` // replaces every part and the media of parts 2..n
+	Media       []string       `json:"media"`  // media of the first part
 	ScheduledAt *string        `json:"scheduled_at"`
 	Options     map[string]any `json:"options"`
 	PlannedAt   *string        `json:"planned_at"` // drafts only: RFC3339, "" or "none" removes it
@@ -316,7 +386,22 @@ func (s *Service) UpdatePost(ctx context.Context, id string, in UpdateInput) (*s
 		p.Parts = []string{*in.Text}
 	}
 	if len(in.Thread) > 0 {
-		p.Parts = in.Thread
+		pm, err := in.Thread.partMedia(in.Media)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.checkMedia(ctx, pm); err != nil {
+			return nil, err
+		}
+		p.Parts = in.Thread.texts()
+		if len(in.Thread[0].Media) > 0 {
+			p.Media = in.Thread[0].Media
+		}
+		p.PartMedia = pm
+	} else if in.Media != nil {
+		if err := s.checkMedia(ctx, [][]string{in.Media}); err != nil {
+			return nil, err
+		}
 	}
 	if in.Media != nil {
 		p.Media = in.Media
@@ -403,6 +488,44 @@ func (s *Service) PublishNow(ctx context.Context, id string) (*store.Post, error
 	return s.Store.GetPost(ctx, id)
 }
 
+// checkMedia refuses media ids that do not exist.
+func (s *Service) checkMedia(ctx context.Context, partMedia [][]string) error {
+	for i, ids := range partMedia {
+		for _, m := range ids {
+			if _, err := s.Store.GetMedia(ctx, m); err != nil {
+				if i == 0 {
+					return invalid("unknown media %q", m)
+				}
+				return invalid("unknown media %q (thread part %d)", m, i+1)
+			}
+		}
+	}
+	return nil
+}
+
+// partFiles opens the media of every part. The result always has at least one element (part 1).
+func (s *Service) partFiles(ctx context.Context, partMedia [][]string) ([][]providers.MediaFile, error) {
+	out := make([][]providers.MediaFile, max(1, len(partMedia)))
+	for i, ids := range partMedia {
+		f, err := s.mediaFiles(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = f
+	}
+	return out, nil
+}
+
+func postPartMedia(p *store.Post) [][]string {
+	n := max(1, len(p.PartMedia))
+	out := make([][]string, n)
+	out[0] = p.Media
+	for i := 1; i < n; i++ {
+		out[i] = p.PartMedia[i]
+	}
+	return out
+}
+
 func (s *Service) mediaFiles(ctx context.Context, ids []string) ([]providers.MediaFile, error) {
 	var out []providers.MediaFile
 	for _, id := range ids {
@@ -465,24 +588,42 @@ func (s *Service) publish(ctx context.Context, p *store.Post) error {
 	if err != nil {
 		return err
 	}
-	media, err := s.mediaFiles(ctx, p.Media)
+	files, err := s.partFiles(ctx, postPartMedia(p))
 	if err != nil {
 		return err
 	}
+	req := providers.PublishRequest{Parts: p.Parts, Media: files[0], Options: p.Options}
+	if len(files) > 1 {
+		req.PartMedia = files
+	}
+	// validate can be skipped with force; media on a part the network cannot attach it to never can.
+	if f, ferr := providers.Get(acc.Provider); ferr == nil && !f.MediaPerPart {
+		if n := req.LaterMedia(); n > 0 {
+			return providers.Invalid(fmt.Sprintf("%s: part %d has media, but only the first part can carry media on this network", acc.Provider, n))
+		}
+	}
 	// Resume a thread that stopped half-way: publish only the missing parts, chained to the last one sent.
+	// reply_to is the last part sent (X and Threads chain replies), thread_root the first one (Facebook,
+	// Instagram and LinkedIn comment on the post itself).
 	if done := len(p.RemoteIDs); done > 0 && done < len(p.Parts) {
 		opts := map[string]any{}
 		for k, v := range p.Options {
 			opts[k] = v
 		}
 		opts["reply_to"] = p.RemoteIDs[done-1]
-		res, err := cl.Publish(ctx, providers.PublishRequest{Parts: p.Parts[done:], Options: opts})
+		opts["thread_root"] = p.RemoteIDs[0]
+		rest := providers.PublishRequest{Parts: p.Parts[done:], Options: opts}
+		if done < len(req.PartMedia) {
+			rest.PartMedia = req.PartMedia[done:]
+			rest.Media = rest.PartMedia[0]
+		}
+		res, err := cl.Publish(ctx, rest)
 		if res != nil {
 			p.RemoteIDs = append(p.RemoteIDs, res.RemoteIDs...)
 		}
 		return err
 	}
-	res, err := cl.Publish(ctx, providers.PublishRequest{Parts: p.Parts, Media: media, Options: p.Options})
+	res, err := cl.Publish(ctx, req)
 	if res != nil {
 		p.RemoteID, p.RemoteIDs, p.RemoteURL = res.RemoteID, res.RemoteIDs, res.URL
 		if p.RemoteID == "" && len(res.RemoteIDs) > 0 {
@@ -492,13 +633,31 @@ func (s *Service) publish(ctx context.Context, p *store.Post) error {
 	return err
 }
 
-// validate runs the provider's pre-flight checks.
-func (s *Service) validate(a *store.Account, parts []string, media []providers.MediaFile, opts map[string]any) []string {
+// validate runs the provider's pre-flight checks. media holds the media of each part (media[0]: part 1).
+func (s *Service) validate(a *store.Account, parts []string, media [][]providers.MediaFile, opts map[string]any) []string {
 	f, err := providers.Get(a.Provider)
-	if err != nil || f.Validate == nil {
+	if err != nil {
 		return nil
 	}
-	return f.Validate(providers.PublishRequest{Parts: parts, Media: media, Options: opts})
+	req := providers.PublishRequest{Parts: parts, Options: opts}
+	if len(media) > 0 {
+		req.Media = media[0]
+	}
+	if len(media) > 1 {
+		req.PartMedia = media
+	}
+	var out []string
+	if !f.MediaPerPart {
+		for i := 1; i < len(parts); i++ {
+			if len(req.MediaOf(i)) > 0 {
+				out = append(out, fmt.Sprintf("part %d has media, but %s only takes media on the first part (later parts are text only)", i+1, a.Provider))
+			}
+		}
+	}
+	if f.Validate != nil {
+		out = append(out, f.Validate(req)...)
+	}
+	return out
 }
 
 type ValidationResult struct {
@@ -511,7 +670,11 @@ type ValidationResult struct {
 
 // Validate checks a post against every target network without scheduling it.
 func (s *Service) Validate(ctx context.Context, in ScheduleInput) ([]ValidationResult, error) {
-	files, err := s.mediaFiles(ctx, in.Media)
+	partMedia, err := in.Thread.partMedia(in.Media)
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.partFiles(ctx, partMedia)
 	if err != nil {
 		return nil, invalid("%v", err)
 	}
