@@ -758,3 +758,27 @@ func (c *Client) UploadMedia(ctx context.Context, m providers.MediaFile) (string
 		}
 	}
 }
+
+// Delete removes the posts of a thread, last reply first (DELETE /2/tweets/:id).
+// https://docs.x.com/x-api/posts/delete-post
+func (c *Client) Delete(ctx context.Context, remoteIDs []string) error {
+	for i := len(remoteIDs) - 1; i >= 0; i-- {
+		id := remoteIDs[i]
+		var r struct {
+			Data struct {
+				Deleted bool `json:"deleted"`
+			} `json:"data"`
+			Errors []apiError `json:"errors"`
+		}
+		if err := c.do(ctx, "DELETE", "/2/tweets/"+url.PathEscape(id), nil, &r); err != nil {
+			if providers.NotFound(err) {
+				continue
+			}
+			return fmt.Errorf("x: delete post %s: %w", id, err)
+		}
+		if !r.Data.Deleted {
+			return fmt.Errorf("x: post %s not deleted: %s", id, errorsText(r.Errors))
+		}
+	}
+	return nil
+}

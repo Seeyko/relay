@@ -111,3 +111,22 @@ func graphError(err error) (code, subcode int, msg string) {
 	}
 	return e.Error.Code, e.Error.Subcode, msg
 }
+
+func (a *api) del(ctx context.Context, path string, out any) error {
+	v := url.Values{"access_token": {a.Token}}
+	req, err := http.NewRequestWithContext(ctx, "DELETE", a.Base+path+"?"+v.Encode(), nil)
+	if err != nil {
+		return err
+	}
+	return a.send(req, out)
+}
+
+// gone says whether a Graph error means the object does not exist (any more): HTTP 404, or code 100
+// with subcode 33 ("Object with ID ... does not exist").
+func gone(err error) bool {
+	if providers.NotFound(err) {
+		return true
+	}
+	code, sub, _ := graphError(err)
+	return code == 100 && sub == 33
+}
