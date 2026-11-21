@@ -22,6 +22,7 @@ import (
 	"github.com/Seeyko/relay/internal/ui"
 
 	// connectors register themselves
+	_ "github.com/Seeyko/relay/internal/providers/linkedin"
 	_ "github.com/Seeyko/relay/internal/providers/meta"
 	_ "github.com/Seeyko/relay/internal/providers/tiktok"
 	_ "github.com/Seeyko/relay/internal/providers/website"
