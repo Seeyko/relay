@@ -230,3 +230,6 @@ select.role:disabled { opacity: .6; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 
 #preview-body:focus { outline: none; }
+
+.sync { display: block; font-size: 12px; color: var(--muted); margin-top: 1px; }
+.sync.bad { color: var(--danger); }

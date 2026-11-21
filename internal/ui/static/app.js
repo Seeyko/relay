@@ -22,7 +22,7 @@ const T = FR
       team: "Équipe", invite: "Inviter", invited: "Invité", resend: "Renvoyer", cancel: "Annuler", remove: "Retirer",
       addPasskey: "Ajouter une passkey", signOut: "Se déconnecter", by: "par", noEmail: "Email non configuré",
       roles: { owner: "Propriétaire", admin: "Admin", editor: "Éditeur", viewer: "Lecteur" }, save: "OK",
-      accounts: "Comptes", reconnect: "Reconnecter", connectNet: "Connecter un réseau", noAccounts: "Aucun compte",
+      accounts: "Comptes", reconnect: "Reconnecter", synced: "Synchro", syncFailed: "Échec de synchro", neverSynced: "Jamais synchronisé", connectNet: "Connecter un réseau", noAccounts: "Aucun compte",
       redirects: "URI de redirection", noNetworks: "Aucune connexion réseau configurée" }
   : { signIn: "Sign in", addKey: "Add a key", token: "API token", create: "Create", week: "Week", day: "Day",
       empty: "Nothing planned", cancelled: "Cancelled.", failed: "Failed", unsupported: "This browser doesn't support passkeys.",
@@ -40,7 +40,7 @@ const T = FR
       team: "Team", invite: "Invite", invited: "Invited", resend: "Resend", cancel: "Cancel", remove: "Remove",
       addPasskey: "Add a passkey", signOut: "Sign out", by: "by", noEmail: "Email not configured",
       roles: { owner: "Owner", admin: "Admin", editor: "Editor", viewer: "Viewer" }, save: "OK",
-      accounts: "Accounts", reconnect: "Reconnect", connectNet: "Connect a network", noAccounts: "No accounts",
+      accounts: "Accounts", reconnect: "Reconnect", synced: "Synced", syncFailed: "Sync failed", neverSynced: "Never synced", connectNet: "Connect a network", noAccounts: "No accounts",
       redirects: "Redirect URIs", noNetworks: "No network sign-in configured" };
 const NET_NAMES = { x: "X", instagram: "Instagram", facebook: "Facebook", threads: "Threads", "linkedin-page": "LinkedIn",
   youtube: "YouTube", tiktok: "TikTok", website: "Website" };
@@ -883,6 +883,30 @@ async function startConnection(body) {
   location.assign(r.url);
 }
 
+// syncLine: when Relay last reached the network for this account; red when the last call failed or
+// nothing worked for a day.
+const fRel = new Intl.RelativeTimeFormat(L, { numeric: "auto", style: "short" });
+function ago(iso) {
+  const s = (new Date(iso) - Date.now()) / 1000;
+  const units = [["day", 86400], ["hour", 3600], ["minute", 60]];
+  for (const [u, n] of units) if (Math.abs(s) >= n) return fRel.format(Math.round(s / n), u);
+  return fRel.format(0, "minute");
+}
+function syncLine(a) {
+  const line = el("span", "sync");
+  if (a.sync_error) {
+    line.classList.add("bad");
+    line.textContent = `${T.syncFailed} ${ago(a.sync_error_at)}`;
+    line.title = a.sync_error;
+    return line;
+  }
+  if (!a.synced_at) { line.classList.add("bad"); line.textContent = T.neverSynced; return line; }
+  if (Date.now() - new Date(a.synced_at) > 24 * 3600 * 1000) line.classList.add("bad");
+  line.textContent = `${T.synced} ${ago(a.synced_at)}`;
+  line.title = new Date(a.synced_at).toLocaleString(L);
+  return line;
+}
+
 async function openAccounts() {
   const holder = openSheet(T.accounts);
   holder.append(el("div", "pv-loading"));
@@ -906,6 +930,7 @@ async function openAccounts() {
       const info = el("div", "app-info");
       info.append(el("b", "", a.name || a.handle || a.id),
         el("span", "app-meta", [a.handle ? "@" + a.handle.replace(/^@/, "") : "", NET_NAMES[a.provider] || a.provider].filter(Boolean).join(" · ")));
+      info.append(syncLine(a));
       row.append(pic, info);
       if (a.reconnect) row.append(smallBtn(T.reconnect, "plain", () => startConnection({ account_id: a.id })));
       list.append(row);

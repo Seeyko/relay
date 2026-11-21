@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -85,5 +86,42 @@ func TestAccountsSheetRoles(t *testing.T) {
 	}
 	if got := len(m.Networks()); got != 1 {
 		t.Fatal(got)
+	}
+}
+
+func TestAccountsSyncStatus(t *testing.T) {
+	h := newHarnessWith(t, nil)
+	ctx := context.Background()
+	owner := signedIn(t, h.st, store.RoleOwner, "o@example.com")
+	acc := &store.Account{Provider: "x", Name: "RMP", Handle: "rmp"}
+	if err := h.st.CreateAccount(ctx, acc); err != nil {
+		t.Fatal(err)
+	}
+	row := func() map[string]any {
+		t.Helper()
+		code, out := h.do("GET", "/ui/api/accounts", nil, owner)
+		accs, _ := out["accounts"].([]any)
+		if code != 200 || len(accs) != 1 {
+			t.Fatalf("%d %v", code, out)
+		}
+		return accs[0].(map[string]any)
+	}
+	if r := row(); r["synced_at"] != nil || r["sync_error"] != nil {
+		t.Fatalf("never synced: %v", r)
+	}
+	t0 := time.Now().Add(-time.Hour)
+	h.st.RecordSync(ctx, acc.ID, t0, nil)
+	if r := row(); r["synced_at"] == nil || r["sync_error"] != nil {
+		t.Fatalf("synced: %v", r)
+	}
+	// a failure after the last success is shown...
+	h.st.RecordSync(ctx, acc.ID, t0.Add(time.Minute), errors.New("http 401: token expired"))
+	if r := row(); r["sync_error"] != "http 401: token expired" || r["sync_error_at"] == nil || r["synced_at"] == nil {
+		t.Fatalf("failed: %v", r)
+	}
+	// ...until a later success hides it
+	h.st.RecordSync(ctx, acc.ID, t0.Add(2*time.Minute), nil)
+	if r := row(); r["sync_error"] != nil {
+		t.Fatalf("recovered: %v", r)
 	}
 }

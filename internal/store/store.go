@@ -155,6 +155,9 @@ var addedColumns = [][3]string{
 	{"accounts", "avatar_media_id", "TEXT"},
 	{"accounts", "avatar_source", "TEXT"},
 	{"accounts", "avatar_checked_at", "TIMESTAMP"},
+	{"accounts", "synced_at", "TIMESTAMP"},
+	{"accounts", "sync_error", "TEXT NOT NULL DEFAULT ''"},
+	{"accounts", "sync_error_at", "TIMESTAMP"},
 	// team members (users.go)
 	{"passkeys", "user_id", "TEXT REFERENCES users(id) ON DELETE CASCADE"},
 	{"oauth_codes", "user_id", "TEXT"},
@@ -1106,4 +1109,38 @@ func (s *Store) DeletePasskey(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// ---------- account sync status ----------
+
+// SyncStatus is when Relay last talked to the network successfully for an account, and its last failure.
+type SyncStatus struct {
+	SyncedAt *time.Time
+	Error    string
+	ErrorAt  *time.Time
+}
+
+// RecordSync stores the outcome of a call to the network for an account (metrics, counters...).
+func (s *Store) RecordSync(ctx context.Context, accountID string, at time.Time, syncErr error) error {
+	if syncErr == nil {
+		_, err := s.db.ExecContext(ctx, `UPDATE accounts SET synced_at=? WHERE id=?`, at.UTC(), accountID)
+		return err
+	}
+	msg := syncErr.Error()
+	if len(msg) > 300 {
+		msg = msg[:300]
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET sync_error=?, sync_error_at=? WHERE id=?`, msg, at.UTC(), accountID)
+	return err
+}
+
+func (s *Store) GetSyncStatus(ctx context.Context, accountID string) (SyncStatus, error) {
+	var st SyncStatus
+	var ok, eat sql.NullTime
+	err := s.db.QueryRowContext(ctx, `SELECT synced_at, sync_error, sync_error_at FROM accounts WHERE id=?`, accountID).Scan(&ok, &st.Error, &eat)
+	if errors.Is(err, sql.ErrNoRows) {
+		return st, ErrNotFound
+	}
+	st.SyncedAt, st.ErrorAt = nt(ok), nt(eat)
+	return st, err
 }

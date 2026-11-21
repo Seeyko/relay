@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/Seeyko/relay/internal/connect"
 	"github.com/Seeyko/relay/internal/store"
@@ -33,6 +34,11 @@ type accountRow struct {
 	Handle    string `json:"handle"`
 	Avatar    string `json:"avatar,omitempty"`
 	Reconnect string `json:"reconnect,omitempty"` // network slug, "" when none is configured
+	// SyncedAt is the last successful call to the network (metrics, counters); SyncError the last failure,
+	// shown only when it is newer than the last success.
+	SyncedAt    *time.Time `json:"synced_at,omitempty"`
+	SyncError   string     `json:"sync_error,omitempty"`
+	SyncErrorAt *time.Time `json:"sync_error_at,omitempty"`
 }
 
 type networkRow struct {
@@ -54,6 +60,12 @@ func (ui *UI) accountsList(w http.ResponseWriter, r *http.Request) {
 		row := accountRow{ID: a.ID, Provider: a.Provider, Name: a.Name, Handle: a.Handle, Avatar: a.Avatar}
 		if ui.Connect != nil {
 			row.Reconnect = ui.Connect.ReconnectNetwork(r.Context(), a)
+		}
+		if st, err := ui.Store.GetSyncStatus(r.Context(), a.ID); err == nil {
+			row.SyncedAt = st.SyncedAt
+			if st.ErrorAt != nil && (st.SyncedAt == nil || st.ErrorAt.After(*st.SyncedAt)) {
+				row.SyncError, row.SyncErrorAt = st.Error, st.ErrorAt
+			}
 		}
 		rows = append(rows, row)
 	}
