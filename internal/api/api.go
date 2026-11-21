@@ -17,6 +17,7 @@ import (
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/oauth"
+	"github.com/Seeyko/relay/internal/providers/website"
 	"github.com/Seeyko/relay/internal/store"
 	"github.com/Seeyko/relay/internal/team"
 	"github.com/Seeyko/relay/internal/ui"
@@ -111,6 +112,39 @@ func (a *API) Handler() http.Handler {
 	authed.HandleFunc("GET /v1/oauth/grants", a.tool("list_oauth_grants", nil))
 	authed.HandleFunc("DELETE /v1/oauth/grants/{id}", a.tool("revoke_oauth_grant", map[string]string{"id": "id"}))
 	authed.HandleFunc("POST /v1/query", a.tool("sql_query", nil))
+
+	// Site content of website accounts (Relay Site Protocol v2).
+	site := func(name string, extra ...string) http.HandlerFunc {
+		m := map[string]string{"account": "account_id"}
+		for _, p := range extra {
+			m[p] = map[string]string{"article": "article_id", "lang": "lang"}[p]
+		}
+		return a.tool(name, m)
+	}
+	authed.HandleFunc("GET /v1/sites/{account}", site("site_info"))
+	authed.HandleFunc("GET /v1/sites/{account}/articles", site("site_list_articles"))
+	authed.HandleFunc("POST /v1/sites/{account}/articles", site("site_create_article"))
+	authed.HandleFunc("GET /v1/sites/{account}/articles/{article}", site("site_get_article", "article"))
+	authed.HandleFunc("PATCH /v1/sites/{account}/articles/{article}", site("site_update_article", "article"))
+	authed.HandleFunc("DELETE /v1/sites/{account}/articles/{article}", site("site_delete_article", "article"))
+	authed.HandleFunc("POST /v1/sites/{account}/articles/{article}/publish", site("site_publish_article", "article"))
+	authed.HandleFunc("POST /v1/sites/{account}/articles/{article}/unpublish", site("site_unpublish_article", "article"))
+	authed.HandleFunc("GET /v1/sites/{account}/articles/{article}/translations", site("site_list_translations", "article"))
+	authed.HandleFunc("PUT /v1/sites/{account}/articles/{article}/translations/{lang}", site("site_set_translation", "article", "lang"))
+	authed.HandleFunc("DELETE /v1/sites/{account}/articles/{article}/translations/{lang}", site("site_delete_translation", "article", "lang"))
+	authed.HandleFunc("GET /v1/sites/{account}/taxonomy", site("site_taxonomy"))
+	authed.HandleFunc("GET /v1/sites/{account}/authors", site("site_authors"))
+	authed.HandleFunc("POST /v1/sites/{account}/media", site("site_upload_media"))
+	authed.HandleFunc("GET /v1/sites/{account}/actions", site("site_actions"))
+	// The body is the action's arguments.
+	authed.HandleFunc("POST /v1/sites/{account}/actions/{action}", func(w http.ResponseWriter, r *http.Request) {
+		args := json.RawMessage(body(r))
+		if len(args) == 0 {
+			args = json.RawMessage("{}")
+		}
+		raw, _ := json.Marshal(map[string]any{"account_id": r.PathValue("account"), "action": r.PathValue("action"), "args": args})
+		a.call(w, r.WithContext(mcp.WithSource(r.Context(), "rest")), "site_action", raw)
+	})
 
 	// Team members (when the dashboard is on).
 	authed.HandleFunc("GET /v1/members", a.tool("list_members", nil))
@@ -307,6 +341,7 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 	var inv *core.ErrInvalid
 	var denied *team.ErrDenied
 	var bad *team.ErrBadInput
+	var site *website.SiteError
 	switch {
 	case errors.As(err, &denied):
 		writeJSON(w, 403, map[string]string{"error": err.Error()})
@@ -322,6 +357,16 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 		writeJSON(w, 404, map[string]string{"error": err.Error()})
 	case errors.As(err, &inv):
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
+	case errors.As(err, &site):
+		// The site's own refusals keep their meaning; its auth errors are Relay's 502 (the account's token).
+		switch {
+		case site.Status == 404 || site.Status == 409 || site.Status == 422 || site.Status == 400:
+			writeJSON(w, site.Status, map[string]string{"error": err.Error()})
+		case site.Status >= 400 && site.Status < 500 && site.Status != 401 && site.Status != 403 && site.Status != 429:
+			writeJSON(w, 400, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, 502, map[string]string{"error": err.Error()})
+		}
 	default:
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 	}

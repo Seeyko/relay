@@ -98,6 +98,10 @@ func parseSince(s string, def time.Duration) (time.Time, error) {
 
 // BuildTools exposes the service to agents.
 func BuildTools(svc *core.Service) []Tool {
+	return append(coreTools(svc), siteTools(svc)...)
+}
+
+func coreTools(svc *core.Service) []Tool {
 	return []Tool{
 		{
 			Name:        "list_providers",
@@ -304,14 +308,31 @@ func BuildTools(svc *core.Service) []Tool {
 		{
 			Name:        "delete_post",
 			Admin:       true,
-			Description: "Delete a post from Relay (does not delete it from the network).",
-			InputSchema: obj(map[string]any{"id": str("Post id")}, "id"),
+			Description: "Delete a post from Relay (does not delete it from the network). For a post of a website account, delete_on_site: true also deletes the article on the site (needs its delete capability; an article already gone is fine).",
+			InputSchema: obj(map[string]any{"id": str("Post id"), "delete_on_site": map[string]any{"type": "boolean", "description": "website posts only: also delete the article on the site"}}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
-				a, err := decode[struct{ ID string }](raw)
+				a, err := decode[struct {
+					ID           string `json:"id"`
+					DeleteOnSite bool   `json:"delete_on_site"`
+				}](raw)
 				if err != nil {
 					return nil, err
 				}
-				return map[string]bool{"deleted": true}, svc.Store.DeletePost(ctx, a.ID)
+				out := map[string]bool{"deleted": true}
+				if a.DeleteOnSite {
+					p, err := svc.Store.GetPost(ctx, a.ID)
+					if err != nil {
+						return nil, err
+					}
+					if err := svc.DeleteOnSite(ctx, p); err != nil {
+						return nil, err
+					}
+					out["deleted_on_site"] = true
+				}
+				if err := svc.Store.DeletePost(ctx, a.ID); err != nil {
+					return nil, err
+				}
+				return out, nil
 			},
 		},
 		{
