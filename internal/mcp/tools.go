@@ -333,7 +333,11 @@ func coreTools(svc *core.Service) []Tool {
 						return nil, err
 					}
 				}
-				return svc.DeletePost(ctx, a.ID, a.Remote)
+				res, err := svc.DeletePost(ctx, a.ID, a.Remote)
+				if err == nil && a.DeleteOnSite {
+					res.DeletedOnSite = true
+				}
+				return res, err
 			},
 		},
 		{

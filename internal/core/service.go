@@ -639,6 +639,8 @@ type DeleteResult struct {
 	Deleted bool `json:"deleted"`
 	// RemoteDeleted lists the network ids removed from the network (remote=true only).
 	RemoteDeleted []string `json:"remote_deleted,omitempty"`
+	// DeletedOnSite: the article was also deleted on the website (delete_on_site=true).
+	DeletedOnSite bool `json:"deleted_on_site,omitempty"`
 }
 
 // DeletePost removes a post from Relay. With remote, it first deletes the published post from the
