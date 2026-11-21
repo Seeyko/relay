@@ -270,7 +270,7 @@ func coreTools(svc *core.Service) []Tool {
 		},
 		{
 			Name:        "get_post",
-			Description: "Get one post with its status, link, error and latest metrics.",
+			Description: "Get one post with its status, link, error and latest metrics. Media are ids: get_media with post=<id> gives their public urls.",
 			InputSchema: obj(map[string]any{"id": str("Post id")}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct{ ID string }](raw)
@@ -363,6 +363,26 @@ func coreTools(svc *core.Service) []Tool {
 					return nil, err
 				}
 				return svc.SaveMediaFromURL(ctx, a.URL)
+			},
+		},
+		{
+			Name: "get_media",
+			Description: "Get media files to show them to a person: filename, mime, size and a public url that opens in a browser " +
+				"without a Relay login (download it with a plain GET, e.g. to attach it to a chat message). Give media ids, " +
+				"or a post id to get every media of that post in publishing order (carousel slides, then the media of each thread part).",
+			InputSchema: obj(map[string]any{
+				"ids":  strs("Media ids (med_...)"),
+				"post": str("Post id: list the media of this post, in order"),
+			}),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					IDs  list   `json:"ids"`
+					Post string `json:"post"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.MediaLinks(ctx, a.IDs, a.Post)
 			},
 		},
 		{
