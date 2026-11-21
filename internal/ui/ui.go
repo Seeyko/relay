@@ -497,6 +497,8 @@ type calPost struct {
 	RemoteURL string     `json:"remote_url,omitempty"`
 	Error     string     `json:"error,omitempty"`
 	Source    string     `json:"source"`
+	// Stats: normalized counters of a published post (views, likes, comments...).
+	Stats map[string]float64 `json:"stats,omitempty"`
 }
 
 func (ui *UI) calendar(w http.ResponseWriter, r *http.Request) {
@@ -533,7 +535,7 @@ func (ui *UI) calendar(w http.ResponseWriter, r *http.Request) {
 		case p.PlannedAt != nil:
 			cp.At, cp.Planned = p.PlannedAt, true
 		case p.Status == store.StatusDraft:
-			continue // a draft without a planned time has no place in the calendar: see the Drafts view has no place in the calendar: see the Drafts view
+			continue // a draft without a planned time has no place in the calendar: see the Drafts view
 		default:
 			t := p.CreatedAt
 			cp.At = &t
@@ -546,6 +548,9 @@ func (ui *UI) calendar(w http.ResponseWriter, r *http.Request) {
 		}
 		if s, ok := p.Options["kind"].(string); ok {
 			cp.Kind = s
+		}
+		if p.Status == store.StatusPublished {
+			cp.Stats = core.PublicStats(p.Metrics)
 		}
 		for _, id := range p.Media {
 			m, ok := mediaCache[id]

@@ -35,11 +35,18 @@ const ICONS = {
   youtube: "M21.6 7.2a2.7 2.7 0 0 0-1.9-1.9C18 4.8 12 4.8 12 4.8s-6 0-7.7.5a2.7 2.7 0 0 0-1.9 1.9A28 28 0 0 0 2 12a28 28 0 0 0 .4 4.8 2.7 2.7 0 0 0 1.9 1.9c1.7.5 7.7.5 7.7.5s6 0 7.7-.5a2.7 2.7 0 0 0 1.9-1.9A28 28 0 0 0 22 12a28 28 0 0 0-.4-4.8zM10 15V9l5.2 3z",
   tiktok: "M16.5 2h-3.3v13.2a2.9 2.9 0 1 1-2.9-2.9c.3 0 .6 0 .9.1V9a6.3 6.3 0 1 0 5.3 6.2V8.6a7.9 7.9 0 0 0 4.5 1.4V6.7a4.6 4.6 0 0 1-4.5-4.7z",
   facebook: "M22 12a10 10 0 1 0-11.6 9.9v-7H7.9V12h2.5V9.8c0-2.5 1.5-3.9 3.8-3.9 1.1 0 2.2.2 2.2.2v2.5h-1.3c-1.2 0-1.6.8-1.6 1.6V12h2.8l-.4 2.9h-2.3v7A10 10 0 0 0 22 12z",
+  "linkedin-page": "M4.5 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4zM3 9h3v12H3zM9 9h3v1.7c.5-.9 1.7-1.9 3.6-1.9 3.4 0 4.4 2.1 4.4 5.3V21h-3v-6.2c0-1.6-.3-3-2.1-3-1.9 0-2.4 1.3-2.4 3V21H9z",
+  threads: "M12 2a10 10 0 1 0 6.3 17.8l-1.3-1.6A8 8 0 1 1 20 12v1.2c0 1.2-.8 2-1.8 2s-1.7-.8-1.7-2V8h-2v.9A4.5 4.5 0 1 0 15 15.4a3.6 3.6 0 0 0 3.2 1.8c2.2 0 3.8-1.7 3.8-4V12A10 10 0 0 0 12 2zm0 12.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z",
   website: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 9h-3a15 15 0 0 0-1.3-5.6A8 8 0 0 1 18.9 11zM12 4c.9 1.2 1.8 3.6 1.9 7h-3.8c.1-3.4 1-5.8 1.9-7zM9.4 5.4A15 15 0 0 0 8.1 11h-3a8 8 0 0 1 4.3-5.6zM5.1 13h3a15 15 0 0 0 1.3 5.6A8 8 0 0 1 5.1 13zM12 20c-.9-1.2-1.8-3.6-1.9-7h3.8c-.1 3.4-1 5.8-1.9 7zm2.6-1.4a15 15 0 0 0 1.3-5.6h3a8 8 0 0 1-4.3 5.6z",
 };
 const KEY_ICON = "M15 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM12 10v11m0-4h3m-3-3h2";
 const EXT_ICON = "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5";
 const CLOSE_ICON = "M6 6l12 12M18 6L6 18";
+const EYE_ICON = "M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zm10-3a3 3 0 1 0 0 6 3 3 0 0 0 0-6z";
+const HEART_ICON = "M12 20s-7-4.4-9.2-8.6C1.4 8.6 3.2 5 6.6 5c2 0 3.4 1.1 4.2 2.4h2.4C14 6.1 15.4 5 17.4 5c3.4 0 5.2 3.6 3.8 6.4C19 15.6 12 20 12 20z";
+const COMMENT_ICON = "M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12z";
+const SHARE_ICON = "M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3";
+const SAVE_ICON = "M6 3h12v18l-6-4-6 4z";
 const WARN_ICON = "M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z";
 
 const mobile = matchMedia("(max-width: 760px)");
@@ -168,7 +175,9 @@ const fWd = new Intl.DateTimeFormat(L, { weekday: "short" });
 const fWdNarrow = new Intl.DateTimeFormat(L, { weekday: "narrow" });
 const fDay = new Intl.DateTimeFormat(L, { weekday: "short", day: "numeric", month: "short" });
 const fRange = new Intl.DateTimeFormat(L, { day: "numeric", month: "short" });
-const fLong = new Intl.DateTimeFormat(L, { weekday: "long", day: "numeric", month: "long", hour: "numeric", minute: "2-digit" });
+
+const fCompact = new Intl.NumberFormat(L, { notation: "compact", maximumFractionDigits: 1 });
+const fShort = new Intl.DateTimeFormat(L, { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 
 const showDay = () => mobile.matches || state.view === "day";
 
@@ -232,6 +241,9 @@ function postCard(p, inHour) {
   if (p.parts.length > 1) meta.append(el("span", "", `· ${p.parts.length}`));
   if (status === "draft") meta.append(el("span", "tag", T.draft));
   if (status === "failed") meta.append(el("i", "flag"));
+  const st = p.stats || {};
+  const top = st.views > 0 ? ["views", EYE_ICON] : st.likes > 0 ? ["likes", HEART_ICON] : null;
+  if (top) { const k = el("span", "kpi"); k.append(svg(top[1]), document.createTextNode(fCompact.format(st[top[0]]))); meta.append(k); }
   body.append(meta, el("div", "txt", p.title || p.parts[0] || ""));
   c.append(body);
   const t = thumb(p);
@@ -293,14 +305,15 @@ function renderDrafts() {
     const c = el("button", "dcard");
     c.type = "button";
     const head = el("div", "dc-head");
-    head.append(el("span", g.planned_at ? "dc-when" : "dc-when undated", g.planned_at ? fLong.format(new Date(g.planned_at)) : T.noDate));
+    head.append(el("span", g.planned_at ? "dc-when" : "dc-when undated", g.planned_at ? fShort.format(new Date(g.planned_at)) : T.noDate));
     const probs = g.posts.reduce((n, p) => n + p.problems, 0);
     if (probs) { const w = el("span", "warn"); w.append(svg(WARN_ICON), document.createTextNode(String(probs))); head.append(w); }
     const nets = el("div", "dc-nets");
     for (const p of g.posts) {
       const chip = el("span", "chip" + (p.problems ? " bad" : ""));
       chip.style.setProperty("--net", netColor(p));
-      chip.append(netIcon(p), el("span", "", p.handle ? "@" + p.handle : NET_NAMES[p.provider] || p.provider));
+      chip.setAttribute("aria-label", NET_NAMES[p.provider] || p.provider);
+      chip.append(netIcon(p));
       nets.append(chip);
     }
     const lead = g.posts[0];
@@ -365,73 +378,56 @@ function safeURL(u) {
 }
 
 // ---------- preview ----------
-// The full preview of a post group: every account, complete text, media, options, pre-flight problems.
-// Layouts mimic how each network arranges a post (thread, caption cut, title...) with neutral styling.
+// One post group: a tab per account, the post laid out roughly like the network, its stats once published.
 
 function fmtIn(tz, d, opts) {
   try { return new Intl.DateTimeFormat(L, { ...opts, timeZone: tz }).format(d); } catch { return new Intl.DateTimeFormat(L, opts).format(d); }
 }
-const LONG_OPTS = { weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "numeric", minute: "2-digit" };
+const SHORT_OPTS = { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" };
 
-// whenLine: "Planned for Tuesday 3 December 2026, 10:00 (Europe/Paris)" and the viewer's time when it differs.
-function whenLine(post, tz) {
-  const [label, at] =
-    post.status === "draft" ? [T.plannedFor, post.planned_at] :
-    post.status === "published" ? [T.publishedAt, post.published_at] :
-    post.status === "failed" ? [T.failedAt, post.scheduled_at] :
-    [T.scheduledFor, post.scheduled_at];
-  const box = el("div", "pv-when");
-  if (!at) { box.append(el("span", "", post.status === "draft" ? T.noDate : "")); return box; }
-  const d = new Date(at);
-  box.append(el("span", "", `${label} ${fmtIn(tz, d, LONG_OPTS)}`), el("span", "tz", tz));
-  const mine = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  if (mine && mine !== tz && fmtIn(mine, d, LONG_OPTS) !== fmtIn(tz, d, LONG_OPTS)) {
-    box.append(el("span", "alt-time", `${fmtIn(mine, d, LONG_OPTS)} (${T.local})`));
-  }
-  return box;
+function whenText(post, tz) {
+  const at = post.status === "draft" ? post.planned_at : post.status === "published" ? post.published_at : post.scheduled_at;
+  if (!at) return post.status === "draft" ? T.noDate : "";
+  return fmtIn(tz, new Date(at), SHORT_OPTS);
 }
 
 function statusPill(status) {
-  const label = { draft: T.draft, scheduled: T.scheduled, publishing: T.publishing, published: T.published, failed: T.failedS }[status] || status;
-  return el("span", "pill " + status, label);
+  const label = { draft: T.draft, scheduled: T.scheduled, publishing: T.publishing, failed: T.failedS }[status];
+  return label ? el("span", "pill " + status, label) : null;
 }
 
-function counter(t) {
-  if (!t.limit && t.unit !== "bytes") return el("span", "count", String(t.count));
-  const c = el("span", "count" + (t.limit && t.count > t.limit ? " over" : ""), t.limit ? `${t.count} / ${t.limit}` : String(t.count));
-  if (t.unit === "bytes") c.append(document.createTextNode(" B"));
-  return c;
+// A character counter only matters before publishing, and only near the limit.
+function counter(t, live) {
+  if (live || !t.limit || t.count < t.limit * 0.8) return null;
+  return el("span", "count" + (t.count > t.limit ? " over" : ""), `${t.count}/${t.limit}`);
 }
 
-// foldedText shows what the network displays before its "more" cut, with a toggle to the full text.
 function foldedText(t, cls) {
   const box = el("div", cls);
   const chars = Array.from(t.text);
-  // The cut comes at the fold or at the first line break before it, whichever is first.
   let cut = t.fold || 0;
   const nl = chars.indexOf("\n");
   if (cut && nl >= 0 && nl < cut) cut = nl;
   if (cut >= chars.length) cut = 0;
-  if (cut && cut === t.fold) { // end on a word, like the networks do
+  if (cut && cut === t.fold) {
     const sp = chars.slice(0, cut).lastIndexOf(" ");
     if (sp > cut - 25) cut = sp;
   }
   if (!cut) { box.textContent = t.text; return box; }
-  const short = el("span", "", chars.slice(0, cut).join("").trimEnd());
   const more = el("button", "more", `… ${T.more}`);
   more.type = "button";
   more.addEventListener("click", () => { box.replaceChildren(document.createTextNode(t.text)); });
-  box.append(short, more);
+  box.append(el("span", "", chars.slice(0, cut).join("").trimEnd()), more);
   return box;
 }
 
-function mediaEl(m, { controls = true } = {}) {
+function mediaEl(m) {
   if (m.missing) return el("div", "m-missing", T.missing);
   if ((m.mime || "").startsWith("video/")) {
-    const v = el("video"); v.src = m.path; v.controls = controls; v.preload = "metadata"; v.playsInline = true;
+    const v = el("video"); v.src = m.path; v.controls = true; v.preload = "metadata"; v.playsInline = true;
     return v;
   }
-  const i = el("img"); i.src = m.path; i.alt = m.filename || ""; i.decoding = "async";
+  const i = el("img"); i.src = m.path; i.alt = ""; i.decoding = "async";
   return i;
 }
 
@@ -446,204 +442,152 @@ function carousel(media) {
   return g;
 }
 
-function who(acc) {
-  const w = el("div", "mk-who");
-  const av = el("span", "av", ((acc && (acc.name || acc.handle)) || "?").slice(0, 1).toUpperCase());
-  const n = el("div", "names");
-  n.append(el("b", "", (acc && acc.name) || "?"));
-  if (acc && acc.handle) n.append(el("span", "", "@" + acc.handle));
-  w.append(av, n);
-  return w;
+function textEl(t, cls, live) {
+  const box = el("div", "mk-block");
+  box.append(t.fold ? foldedText(t, cls) : el("div", cls, t.text));
+  const c = counter(t, live);
+  if (c) box.append(c);
+  return box;
 }
 
-function textBlock(t, cls, label) {
-  const b = el("div", "mk-block");
-  const head = el("div", "mk-label");
-  head.append(el("span", "", label), counter(t));
-  b.append(head, t.fold ? foldedText(t, cls) : el("div", cls, t.text));
-  return b;
-}
-
-function mock(pp) {
-  const acc = pp.account;
+function mock(pp, live) {
   const m = el("div", "mock " + pp.layout);
-  const labels = { post: T.post, caption: T.caption, title: T.title, description: T.description, comment: T.comment, body: "" };
+  const title = () => pp.title && m.append(textEl(pp.title, "mk-title", live));
   switch (pp.layout) {
     case "thread":
       pp.texts.forEach((t, i) => {
         const item = el("div", "mk-item");
-        item.append(who(acc));
-        item.append(textBlock(t, "mk-text", pp.texts.length > 1 ? `${i + 1}/${pp.texts.length}` : ""));
+        item.append(textEl(t, "mk-text", live));
         if (i === 0 && pp.media.length) item.append(carousel(pp.media));
         m.append(item);
       });
       break;
-    case "video":
-      if (pp.media.length) m.append(carousel(pp.media));
-      if (pp.title) m.append(textBlock(pp.title, "mk-title", labels.title));
-      pp.texts.forEach((t) => m.append(textBlock(t, "mk-text", labels.description)));
-      break;
     case "post_comments":
-      m.append(who(acc));
       pp.texts.forEach((t, i) => {
-        if (i === 0) {
-          m.append(textBlock(t, "mk-text", ""));
-          if (pp.media.length) m.append(carousel(pp.media));
-        } else {
-          const c = el("div", "mk-comment");
-          c.append(textBlock(t, "mk-text", `${labels.comment} ${i}`));
-          m.append(c);
-        }
+        if (i === 0) { m.append(textEl(t, "mk-text", live)); if (pp.media.length) m.append(carousel(pp.media)); return; }
+        const c = el("div", "mk-comment");
+        c.append(textEl(t, "mk-text", live));
+        m.append(c);
       });
       break;
     case "article":
       if (pp.media.length) m.append(carousel(pp.media));
       if (pp.title) m.append(el("h2", "mk-h", pp.title.text));
-      pp.texts.forEach((t) => m.append(textBlock(t, "mk-text md", "")));
+      pp.texts.forEach((t) => m.append(textEl(t, "mk-text md", live)));
       break;
-    default: // caption: media first, then the caption under the handle
-      m.append(who(acc));
+    default: // caption and video: visual first, then title and text
       if (pp.media.length) m.append(carousel(pp.media));
-      if (pp.title) m.append(textBlock(pp.title, "mk-title", labels.title));
-      pp.texts.forEach((t) => m.append(textBlock(t, "mk-text", labels[t.label] || "")));
+      title();
+      pp.texts.forEach((t) => m.append(textEl(t, "mk-text", live)));
   }
   return m;
 }
 
-function fmtValue(k, v) {
-  if (typeof v === "boolean") return v ? T.yes : T.no;
-  if (Array.isArray(v)) return v.map((x) => (typeof x === "object" ? JSON.stringify(x) : String(x))).join(", ");
-  if (v && typeof v === "object") return JSON.stringify(v);
-  return String(v);
-}
-
-function optionsTable(opts) {
-  const keys = Object.keys(opts || {}).sort();
-  if (!keys.length) return null;
-  const dl = el("dl", "kv");
-  for (const k of keys) {
-    dl.append(el("dt", "", k));
-    const dd = el("dd");
-    const v = opts[k];
-    const url = typeof v === "string" && /^https?:\/\//.test(v) ? safeURL(v) : null;
-    if (url) { const a = el("a", "", v); a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer"; dd.append(a); }
-    else dd.textContent = fmtValue(k, v);
-    dl.append(dd);
-  }
-  return dl;
-}
-
-function fmtSize(n) {
-  if (!n) return "";
-  if (n < 1024) return `${n} B`;
-  if (n < 1 << 20) return `${(n / 1024).toFixed(0)} KB`;
-  return `${(n / (1 << 20)).toFixed(1)} MB`;
-}
-
-function section(title, ...children) {
-  const s = el("section", "pv-sec");
-  s.append(el("h4", "", title), ...children.filter(Boolean));
-  return s;
+function statsRow(st) {
+  if (!st) return null;
+  const row = el("div", "stats");
+  const add = (k, icon) => {
+    if (st[k] === undefined) return;
+    const s = el("span", "stat");
+    s.append(svg(icon), el("b", "", fCompact.format(st[k])));
+    row.append(s);
+  };
+  add("views", EYE_ICON); add("likes", HEART_ICON); add("comments", COMMENT_ICON); add("shares", SHARE_ICON); add("saves", SAVE_ICON);
+  if (st.engagement_rate) row.append(el("span", "stat rate", `${(st.engagement_rate * 100).toFixed(1)} %`));
+  return row.childElementCount ? row : null;
 }
 
 function renderAccount(pp, tz) {
   const p = pp.post;
+  const live = p.status === "published";
+  const prov = pp.account && pp.account.provider;
   const box = el("div", "pv-acc");
-  box.style.setProperty("--net", netColor({ provider: pp.account && pp.account.provider }));
+  box.style.setProperty("--net", netColor({ provider: prov }));
+
   const head = el("div", "pv-head");
-  head.append(netIcon({ provider: pp.account && pp.account.provider }));
+  head.append(netIcon({ provider: prov }));
   const name = el("div", "pv-name");
-  name.append(el("b", "", NET_NAMES[pp.account && pp.account.provider] || (pp.account && pp.account.provider) || "?"));
-  if (pp.account) name.append(el("span", "", `${pp.account.name}${pp.account.handle ? " · @" + pp.account.handle : ""}`));
-  head.append(name, el("span", "spacer"), statusPill(p.status));
-  box.append(head, whenLine(p, tz));
+  name.append(el("b", "", pp.account && pp.account.handle ? "@" + pp.account.handle : NET_NAMES[prov] || prov || "?"));
+  const when = whenText(p, tz);
+  if (when) name.append(el("span", "", when));
+  head.append(name);
+  const pill = statusPill(p.status);
+  if (pill) head.append(pill);
+  box.append(head);
 
   if (pp.problems.length) {
     const ul = el("ul", "pv-problems");
     pp.problems.forEach((x) => ul.append(el("li", "", x)));
-    const h = el("div", "pv-ph");
-    h.append(svg(WARN_ICON), el("span", "", T.problems));
-    const b = el("div", "pv-warnbox");
-    b.append(h, ul);
-    box.append(b);
+    box.append(ul);
   }
-  if (p.error) {
-    const e = el("div", "pv-err");
-    e.append(el("b", "", T.error + " "), document.createTextNode(p.error));
-    if (p.attempts) e.append(el("div", "small", `${p.attempts} ${T.attempts}` + (p.next_attempt_at ? ` · ${T.nextTry} ${fmtIn(tz, new Date(p.next_attempt_at), LONG_OPTS)}` : "")));
-    box.append(e);
-  }
-
-  box.append(mock(pp));
-
-  if (pp.media.length) {
-    const list = el("ol", "pv-mlist");
-    pp.media.forEach((m) => {
-      const li = el("li");
-      li.append(el("span", "fn", m.missing ? m.id : m.filename || m.id), el("span", "mt", m.missing ? T.missing : `${m.mime} · ${fmtSize(m.size)}`));
-      list.append(li);
-    });
-    box.append(section(T.media, list));
-  }
-  box.append(section(T.options, optionsTable(p.options)));
-
-  const meta = el("dl", "kv small");
-  const add = (k, v) => { if (v) { meta.append(el("dt", "", k), el("dd", "", v)); } };
-  add(T.post, p.id);
-  add(T.group, p.group_id);
-  add(T.created, fmtIn(tz, new Date(p.created_at), LONG_OPTS));
-  add(T.updated, fmtIn(tz, new Date(p.updated_at), LONG_OPTS));
-  box.append(section(T.details, meta));
+  if (p.error) box.append(el("p", "pv-err", p.error));
+  const st = statsRow(pp.stats);
+  if (st) box.append(st);
+  box.append(mock(pp, live));
   return box;
 }
 
+// The page behind the sheet must not scroll (iOS scrolls the body through a modal dialog).
+let lockedY = 0;
+function lockPage() {
+  lockedY = window.scrollY;
+  document.body.style.position = "fixed";
+  document.body.style.top = `-${lockedY}px`;
+  document.body.style.left = document.body.style.right = "0";
+}
+function unlockPage() {
+  document.body.style.position = document.body.style.top = document.body.style.left = document.body.style.right = "";
+  window.scrollTo(0, lockedY);
+}
+
 async function openPreview(p) {
+  const dlg = $("preview");
   const body = $("preview-body");
-  const shell = el("div", "pv");
   const top = el("div", "pv-top");
-  const close = el("button", "icon"); close.type = "button"; close.setAttribute("aria-label", T.close); close.append(svg(CLOSE_ICON));
-  close.addEventListener("click", () => $("preview").close());
-  top.append(el("span", "pv-ro", T.readOnly), el("span", "spacer"));
+  const tabs = el("div", "pv-tabs");
+  tabs.setAttribute("role", "tablist");
+  const actions = el("div", "pv-actions");
   const link = p.remote_url && safeURL(p.remote_url);
   if (link) {
     const a = el("a", "icon"); a.href = link; a.target = "_blank"; a.rel = "noopener noreferrer";
     a.setAttribute("aria-label", T.open); a.append(svg(EXT_ICON));
-    top.append(a);
+    actions.append(a);
   }
-  top.append(close);
-  shell.append(top, el("div", "pv-loading"));
-  body.replaceChildren(shell);
-  if (!$("preview").open) $("preview").showModal();
+  const close = el("button", "icon"); close.type = "button"; close.setAttribute("aria-label", T.close); close.append(svg(CLOSE_ICON));
+  close.addEventListener("click", () => dlg.close());
+  actions.append(close);
+  top.append(tabs, actions);
+  const holder = el("div", "pv-body");
+  holder.append(el("div", "pv-loading"));
+  body.replaceChildren(top, holder);
+  if (!dlg.open) { lockPage(); dlg.showModal(); }
 
   let data;
   try { data = await api("posts/" + encodeURIComponent(p.id)); }
   catch (e) {
-    if (e.status === 401) { $("preview").close(); return showLogin(); }
-    shell.lastChild.replaceWith(el("p", "pv-err", `${T.load}: ${e.message}`));
+    if (e.status === 401) { dlg.close(); return showLogin(); }
+    holder.replaceChildren(el("p", "pv-err", `${T.load}: ${e.message}`));
     return;
   }
   const tz = data.timezone || "UTC";
   const posts = data.posts || [];
-  const holder = el("div");
   const show = (i) => {
     holder.replaceChildren(renderAccount(posts[i], tz));
     tabs.querySelectorAll("button").forEach((b, j) => b.setAttribute("aria-selected", i === j));
+    body.scrollTop = 0;
   };
-  const tabs = el("div", "pv-tabs");
-  tabs.setAttribute("role", "tablist");
   if (posts.length > 1) {
     posts.forEach((pp, i) => {
-      const b = el("button", "chip" + (pp.problems.length ? " bad" : ""));
-      b.type = "button"; b.setAttribute("role", "tab");
       const prov = pp.account && pp.account.provider;
+      const b = el("button", "tab" + (pp.problems.length ? " bad" : ""));
+      b.type = "button"; b.setAttribute("role", "tab");
+      b.setAttribute("aria-label", NET_NAMES[prov] || prov || "?");
       b.style.setProperty("--net", netColor({ provider: prov }));
-      b.append(netIcon({ provider: prov }), el("span", "", (pp.account && pp.account.handle) ? "@" + pp.account.handle : NET_NAMES[prov] || prov || "?"));
-      if (pp.problems.length) b.append(svg(WARN_ICON));
+      b.append(netIcon({ provider: prov }));
       b.addEventListener("click", () => show(i));
       tabs.append(b);
     });
   }
-  shell.lastChild.replaceWith(...(posts.length > 1 ? [tabs, holder] : [holder]));
   if (posts.length) show(0);
 }
 
@@ -686,6 +630,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Close the sheet by tapping the backdrop.
   $("preview").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
+  $("preview").addEventListener("close", unlockPage);
 
   // Swipe between days on touch screens.
   let sx = null, sy = null;
