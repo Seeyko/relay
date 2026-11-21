@@ -503,14 +503,23 @@ function renderAccount(pp, tz) {
   const prov = pp.account && pp.account.provider;
   const box = el("div", "pv-acc");
   box.style.setProperty("--net", netColor({ provider: prov }));
+  const drawn = netMock(pp, tz, live);
 
-  const head = el("div", "pv-head");
-  head.append(netIcon({ provider: prov }));
+  // The network mockup carries the name, the time and the counters; around it only what it cannot show.
+  const head = el("div", "pv-head" + (drawn ? " slim" : ""));
+  if (!drawn) head.append(netIcon({ provider: prov }));
   const name = el("div", "pv-name");
-  name.append(el("b", "", pp.account && pp.account.handle ? "@" + pp.account.handle : NET_NAMES[prov] || prov || "?"));
+  if (!drawn) name.append(el("b", "", pp.account && pp.account.handle ? "@" + pp.account.handle : NET_NAMES[prov] || prov || "?"));
   const when = whenText(p, tz);
   if (when) name.append(el("span", "", when));
   head.append(name);
+  const st = pp.stats || {};
+  if (drawn && st.views > 0) {
+    const v = el("span", "stat");
+    v.append(svg(EYE_ICON), el("b", "", fCompact.format(st.views)));
+    head.append(v);
+  }
+  if (drawn && st.engagement_rate) head.append(el("span", "stat rate", `${(st.engagement_rate * 100).toFixed(1)} %`));
   const pill = statusPill(p.status);
   if (pill) head.append(pill);
   box.append(head);
@@ -521,8 +530,9 @@ function renderAccount(pp, tz) {
     box.append(ul);
   }
   if (p.error) box.append(el("p", "pv-err", p.error));
-  const st = statsRow(pp.stats);
-  if (st) box.append(st);
+  if (drawn) { box.append(drawn); return box; }
+  const sr = statsRow(pp.stats);
+  if (sr) box.append(sr);
   box.append(mock(pp, live));
   return box;
 }
@@ -560,7 +570,11 @@ async function openPreview(p) {
   const holder = el("div", "pv-body");
   holder.append(el("div", "pv-loading"));
   body.replaceChildren(top, holder);
-  if (!dlg.open) { lockPage(); dlg.showModal(); }
+  if (!dlg.open) {
+    lockPage(); dlg.showModal();
+    // showModal focuses the first button (close), which draws a ring on touch screens: focus the sheet itself.
+    body.tabIndex = -1; body.focus({ preventScroll: true });
+  }
 
   let data;
   try { data = await api("posts/" + encodeURIComponent(p.id)); }

@@ -51,6 +51,8 @@ type PostPreview struct {
 	Problems []string       `json:"problems"`
 	// Stats are the normalized counters of a published post (see PublicStats).
 	Stats map[string]float64 `json:"stats,omitempty"`
+	// Followers is the account's audience from its latest snapshot (LinkedIn and YouTube show it).
+	Followers int64 `json:"followers,omitempty"`
 }
 
 // PublicStats returns the normalized counters of a post for display: views, likes, comments,
@@ -93,6 +95,7 @@ func (s *Service) PreviewGroup(ctx context.Context, postID string) (*GroupPrevie
 		return nil, err
 	}
 	accs := map[string]*store.Account{}
+	followers := map[string]int64{}
 	out := &GroupPreview{GroupID: p.GroupID, Timezone: s.timezone(), Posts: make([]PostPreview, 0, len(posts))}
 	for _, gp := range posts {
 		a, ok := accs[gp.AccountID]
@@ -102,8 +105,13 @@ func (s *Service) PreviewGroup(ctx context.Context, postID string) (*GroupPrevie
 				return nil, err
 			}
 			accs[gp.AccountID] = a
+			if m, err := s.Store.LatestAccountMetrics(ctx, gp.AccountID); err == nil {
+				followers[gp.AccountID] = m["followers"]
+			}
 		}
-		out.Posts = append(out.Posts, s.PreviewPost(ctx, gp, a))
+		pv := s.PreviewPost(ctx, gp, a)
+		pv.Followers = followers[gp.AccountID]
+		out.Posts = append(out.Posts, pv)
 	}
 	sort.SliceStable(out.Posts, func(i, j int) bool {
 		pi, pj := out.Posts[i], out.Posts[j]

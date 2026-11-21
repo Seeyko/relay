@@ -815,6 +815,15 @@ func (s *Store) AccountSnapshots(ctx context.Context, accountID string, since ti
 	return s.snapshots(ctx, `SELECT at, metrics FROM account_snapshots WHERE account_id=? AND at >= ? ORDER BY at`, accountID, since.UTC())
 }
 
+// LatestAccountMetrics returns the counters of the newest snapshot of an account (nil when there is none).
+func (s *Store) LatestAccountMetrics(ctx context.Context, accountID string) (map[string]int64, error) {
+	sn, err := s.snapshots(ctx, `SELECT at, metrics FROM account_snapshots WHERE account_id=? ORDER BY at DESC LIMIT 1`, accountID)
+	if err != nil || len(sn) == 0 {
+		return nil, err
+	}
+	return sn[0].Metrics, nil
+}
+
 // ---------- Read-only SQL for agents ----------
 
 type QueryResult struct {
