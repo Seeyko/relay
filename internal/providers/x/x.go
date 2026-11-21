@@ -340,7 +340,9 @@ type tweet struct {
 
 type media struct {
 	MediaKey      string           `json:"media_key"`
-	Type          string           `json:"type"` // photo, video, animated_gif
+	Type          string           `json:"type"`              // photo, video, animated_gif
+	URL           string           `json:"url"`               // photos only
+	PreviewImage  string           `json:"preview_image_url"` // videos and GIFs
 	PublicMetrics map[string]int64 `json:"public_metrics"`
 }
 
@@ -499,6 +501,15 @@ func kind(t tweet, mk map[string]media) string {
 	return k
 }
 
+// displaySize asks pbs.twimg.com for the "medium" rendition (at most 1200 px) instead of the original.
+// See https://developer.x.com/en/docs/x-api/v1/data-dictionary/object-model/entities (media sizes).
+func displaySize(u string) string {
+	if u == "" || strings.Contains(u, "?") || !strings.HasPrefix(u, "https://pbs.twimg.com/media/") {
+		return u
+	}
+	return u + "?name=medium"
+}
+
 // History pages GET /2/users/:id/tweets (https://docs.x.com/x-api/users/get-posts).
 // X serves at most the 3,200 most recent posts of a timeline.
 func (c *Client) History(ctx context.Context, since time.Time, max int) ([]providers.HistoryItem, error) {
@@ -517,7 +528,7 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 		q.Set("max_results", "100")
 		q.Set("tweet.fields", "created_at,public_metrics,referenced_tweets,attachments")
 		q.Set("expansions", "attachments.media_keys")
-		q.Set("media.fields", "type,public_metrics")
+		q.Set("media.fields", "type,public_metrics,url,preview_image_url")
 		if !since.IsZero() {
 			q.Set("start_time", since.UTC().Format(time.RFC3339))
 		}
@@ -539,9 +550,18 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 					m["video_view_count"] += v
 				}
 			}
-			out = append(out, providers.HistoryItem{
+			it := providers.HistoryItem{
 				RemoteID: t.ID, Text: t.Text, URL: c.tweetURL(t.ID), CreatedAt: t.CreatedAt, Metrics: m, Kind: kind(t, mk),
-			})
+			}
+			for _, key := range t.Attachments.MediaKeys {
+				switch md := mk[key]; md.Type {
+				case "photo":
+					it.AddVisual(displaySize(md.URL), false)
+				case "video", "animated_gif":
+					it.AddVisual(md.PreviewImage, true)
+				}
+			}
+			out = append(out, it)
 		}
 		if r.Meta.NextToken == "" {
 			break

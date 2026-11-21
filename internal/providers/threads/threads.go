@@ -234,13 +234,17 @@ func (c *Client) maybeRefresh(ctx context.Context) {
 	_ = c.persist(c.creds)
 }
 
-// getFields reads path with fields; on a 400 (a field this app cannot read) it retries with fallback.
-func (c *Client) getFields(ctx context.Context, path string, q url.Values, fields, fallback string, out any) error {
+// getFields reads path with fields; on a 400 (a field this app cannot read) it retries with each
+// fallback field set in turn.
+func (c *Client) getFields(ctx context.Context, path string, q url.Values, out any, fields string, fallbacks ...string) error {
 	q.Set("fields", fields)
 	err := c.api.get(ctx, path, q, out)
-	var he *providers.HTTPError
-	if err != nil && fallback != "" && errors.As(err, &he) && he.Status == 400 {
-		q.Set("fields", fallback)
+	for _, fb := range fallbacks {
+		var he *providers.HTTPError
+		if err == nil || fb == "" || !errors.As(err, &he) || he.Status != 400 {
+			break
+		}
+		q.Set("fields", fb)
 		err = c.api.get(ctx, path, q, out)
 	}
 	return err
@@ -253,7 +257,7 @@ func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 		Username string `json:"username"`
 		Name     string `json:"name"`
 	}
-	if err := c.getFields(ctx, "/me", url.Values{}, "id,username,name", "id,username", &r); err != nil {
+	if err := c.getFields(ctx, "/me", url.Values{}, &r, "id,username,name", "id,username"); err != nil {
 		return nil, err
 	}
 	c.UserID, c.Username = r.ID, r.Username
@@ -715,6 +719,22 @@ func kind(mediaType string, quote bool) string {
 	return ""
 }
 
+// visual is the image part of a Threads media (or of a carousel child).
+type visual struct {
+	MediaType    string `json:"media_type"`
+	MediaURL     string `json:"media_url"`
+	ThumbnailURL string `json:"thumbnail_url"`
+}
+
+func (v visual) addTo(it *providers.HistoryItem) {
+	switch v.MediaType {
+	case "VIDEO":
+		it.AddVisual(v.ThumbnailURL, true)
+	case "IMAGE", "CAROUSEL_ALBUM":
+		it.AddVisual(v.MediaURL, false)
+	}
+}
+
 // History lists the profile's posts (GET /{user-id}/threads; replies live under /replies and are not imported).
 // The list endpoint has no counters, so each post's insights are read too (one call per post, best effort).
 func (c *Client) History(ctx context.Context, since time.Time, max int) ([]providers.HistoryItem, error) {
@@ -730,7 +750,11 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 	if !since.IsZero() {
 		q.Set("since", strconv.FormatInt(since.Unix(), 10))
 	}
-	fields := "id,text,media_type,permalink,timestamp,is_quote_post"
+	// Visuals come in the same request: media_url (an IMAGE; for a VIDEO it is the video file),
+	// thumbnail_url (the cover of a VIDEO) and the children of a CAROUSEL_ALBUM.
+	const base = "id,text,media_type,permalink,timestamp"
+	const visuals = base + ",media_url,thumbnail_url,children{media_type,media_url,thumbnail_url}"
+	chain := []string{visuals + ",is_quote_post", visuals, base}
 	var out []providers.HistoryItem
 	withMetrics := true
 	for len(out) < max {
@@ -738,23 +762,40 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 			Data []struct {
 				ID        string `json:"id"`
 				Text      string `json:"text"`
-				MediaType string `json:"media_type"`
 				Permalink string `json:"permalink"`
 				Timestamp string `json:"timestamp"`
 				Quote     bool   `json:"is_quote_post"`
+				visual
+				Children struct {
+					Data []visual `json:"data"`
+				} `json:"children"`
 			} `json:"data"`
 			Paging paging `json:"paging"`
 		}
-		if err := c.getFields(ctx, "/"+uid+"/threads", q, fields, "id,text,media_type,permalink,timestamp", &r); err != nil {
+		if err := c.getFields(ctx, "/"+uid+"/threads", q, &r, chain[0], chain[1:]...); err != nil {
 			return out, err
 		}
-		fields = q.Get("fields")
+		for i, f := range chain { // keep the field set that worked
+			if f == q.Get("fields") {
+				chain = chain[i:]
+				break
+			}
+		}
 		for _, m := range r.Data {
 			if len(out) >= max {
 				break
 			}
 			t, _ := time.Parse(timeLayout, m.Timestamp)
 			it := providers.HistoryItem{RemoteID: m.ID, Text: m.Text, URL: m.Permalink, CreatedAt: t, Kind: kind(m.MediaType, m.Quote)}
+			if m.MediaType != "REPOST_FACADE" { // a repost shows someone else's post
+				if len(m.Children.Data) > 0 {
+					for _, ch := range m.Children.Data {
+						ch.addTo(&it)
+					}
+				} else {
+					m.visual.addTo(&it)
+				}
+			}
 			if withMetrics && m.MediaType != "REPOST_FACADE" { // reposts return no insights
 				met, err := c.postInsights(ctx, m.ID)
 				var he *providers.HTTPError

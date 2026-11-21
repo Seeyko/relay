@@ -1035,9 +1035,15 @@ type liPost struct {
 		Media *struct {
 			ID string `json:"id"`
 		} `json:"media"`
-		MultiImage *json.RawMessage `json:"multiImage"`
-		Article    *json.RawMessage `json:"article"`
-		Poll       *json.RawMessage `json:"poll"`
+		MultiImage *struct {
+			Images []struct {
+				ID string `json:"id"`
+			} `json:"images"`
+		} `json:"multiImage"`
+		Article *struct {
+			Thumbnail string `json:"thumbnail"` // an image URN
+		} `json:"article"`
+		Poll *json.RawMessage `json:"poll"`
 	} `json:"content"`
 	ReshareContext *struct {
 		Parent string `json:"parent"`
@@ -1070,12 +1076,86 @@ func (p liPost) kind() string {
 	return "text"
 }
 
+// visualURNs lists the image and video URNs of a post's own content, in order. Documents have no
+// image in the API (their downloadUrl is the PDF) and a reshare shows someone else's post.
+func (p liPost) visualURNs() []string {
+	if p.ReshareContext != nil && p.ReshareContext.Parent != "" {
+		return nil
+	}
+	var out []string
+	if p.Content.MultiImage != nil {
+		for _, im := range p.Content.MultiImage.Images {
+			out = append(out, im.ID)
+		}
+	}
+	if p.Content.Article != nil && p.Content.Article.Thumbnail != "" {
+		out = append(out, p.Content.Article.Thumbnail)
+	}
+	if m := p.Content.Media; m != nil && (strings.HasPrefix(m.ID, "urn:li:image:") || strings.HasPrefix(m.ID, "urn:li:video:")) {
+		out = append(out, m.ID)
+	}
+	return out
+}
+
+// visualBatch is the number of URNs per batch GET (?ids=List(...)).
+const visualBatch = 50
+
+// resolveVisuals turns image URNs into their downloadUrl (GET /rest/images?ids=List(...)) and video
+// URNs into their thumbnail (GET /rest/videos?ids=List(...)), in batches. Best effort: a failed
+// batch leaves its posts without visuals.
+func (c *Client) resolveVisuals(ctx context.Context, urns []string) map[string]providers.Visual {
+	out := map[string]providers.Visual{}
+	byEP := map[string][]string{}
+	seen := map[string]bool{}
+	for _, u := range urns {
+		if seen[u] {
+			continue
+		}
+		seen[u] = true
+		if strings.HasPrefix(u, "urn:li:video:") {
+			byEP["videos"] = append(byEP["videos"], u)
+		} else {
+			byEP["images"] = append(byEP["images"], u)
+		}
+	}
+	for _, ep := range []string{"images", "videos"} {
+		list := byEP[ep]
+		for start := 0; start < len(list); start += visualBatch {
+			chunk := list[start:min(start+visualBatch, len(list))]
+			encd := make([]string, len(chunk))
+			for i, u := range chunk {
+				encd[i] = enc(u)
+			}
+			var r struct {
+				Results map[string]struct {
+					DownloadURL string `json:"downloadUrl"`
+					Thumbnail   string `json:"thumbnail"`
+				} `json:"results"`
+			}
+			if _, err := c.call(ctx, "GET", "/rest/"+ep, "ids=List("+strings.Join(encd, ",")+")", nil, &r, nil); err != nil {
+				continue
+			}
+			for urn, v := range r.Results {
+				if ep == "videos" {
+					if v.Thumbnail != "" {
+						out[urn] = providers.Visual{URL: v.Thumbnail, Cover: true}
+					}
+				} else if v.DownloadURL != "" {
+					out[urn] = providers.Visual{URL: v.DownloadURL}
+				}
+			}
+		}
+	}
+	return out
+}
+
 // History lists the page's organic posts, newest first (GET /rest/posts?q=author, sortBy=CREATED).
 func (c *Client) History(ctx context.Context, since time.Time, max int) ([]providers.HistoryItem, error) {
 	if max <= 0 {
 		max = 2000
 	}
 	var out []providers.HistoryItem
+	var urns [][]string // visual URNs of out[i]
 	done := false
 	for start := 0; !done && len(out) < max; start += pageSize {
 		var r struct {
@@ -1100,6 +1180,7 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 				continue
 			}
 			out = append(out, providers.HistoryItem{RemoteID: p.ID, Text: unescapeLittle(p.Commentary), URL: postURL(p.ID), CreatedAt: at, Kind: p.kind()})
+			urns = append(urns, p.visualURNs())
 			if len(out) >= max {
 				break
 			}
@@ -1116,6 +1197,20 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 	if m, err := c.Metrics(ctx, ids); err == nil {
 		for i := range out {
 			out[i].Metrics = m[out[i].RemoteID]
+		}
+	}
+	var all []string
+	for _, u := range urns {
+		all = append(all, u...)
+	}
+	if len(all) > 0 {
+		vis := c.resolveVisuals(ctx, all)
+		for i, us := range urns {
+			for _, u := range us {
+				if v, ok := vis[u]; ok {
+					out[i].AddVisual(v.URL, v.Cover)
+				}
+			}
 		}
 	}
 	return out, nil

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -316,15 +317,16 @@ func TestFacebookHistoryKindsAndAccount(t *testing.T) {
 		q := r.URL.Query()
 		switch r.URL.Path {
 		case "/v26.0/123/posts":
-			if q.Get("since") != "1700000000" || q.Get("limit") != "100" || q.Get("fields") != "id,message,created_time,permalink_url,status_type,attachments{type,media_type}" {
+			if q.Get("since") != "1700000000" || q.Get("limit") != "100" || q.Get("fields") != "id,message,created_time,permalink_url,status_type,full_picture,attachments{type,media_type,media{image{src}},subattachments{type,media_type,media{image{src}}}}" {
 				t.Errorf("query %v", q)
 			}
 			w.Write([]byte(`{"data":[
 				{"id":"123_1","message":"t","created_time":"2026-01-02T03:04:05+0000","status_type":"mobile_status_update"},
-				{"id":"123_2","created_time":"2026-01-02T03:04:05+0000","status_type":"added_photos","attachments":{"data":[{"type":"photo","media_type":"photo"}]}},
-				{"id":"123_3","created_time":"2026-01-02T03:04:05+0000","attachments":{"data":[{"type":"album","media_type":"album"}]}},
-				{"id":"123_4","created_time":"2026-01-02T03:04:05+0000","status_type":"added_video","attachments":{"data":[{"type":"video_inline","media_type":"video"}]}},
-				{"id":"123_5","created_time":"2026-01-02T03:04:05+0000","status_type":"shared_story","attachments":{"data":[{"type":"share","media_type":"link"}]}}
+				{"id":"123_2","created_time":"2026-01-02T03:04:05+0000","status_type":"added_photos","full_picture":"https://fb.cdn/2-full.jpg","attachments":{"data":[{"type":"photo","media_type":"photo","media":{"image":{"src":"https://fb.cdn/2.jpg","width":720}}}]}},
+				{"id":"123_3","created_time":"2026-01-02T03:04:05+0000","attachments":{"data":[{"type":"album","media_type":"album","media":{"image":{"src":"https://fb.cdn/3a.jpg"}},
+					"subattachments":{"data":[{"type":"photo","media":{"image":{"src":"https://fb.cdn/3a.jpg"}}},{"type":"video","media_type":"video","media":{"image":{"src":"https://fb.cdn/3b-thumb.jpg"}}}]}}]}},
+				{"id":"123_4","created_time":"2026-01-02T03:04:05+0000","status_type":"added_video","attachments":{"data":[{"type":"video_inline","media_type":"video","media":{"image":{"src":"https://fb.cdn/4-thumb.jpg"},"source":"https://fb.cdn/4.mp4"}}]}},
+				{"id":"123_5","created_time":"2026-01-02T03:04:05+0000","status_type":"shared_story","full_picture":"https://fb.cdn/5-link.jpg","attachments":{"data":[{"type":"share","media_type":"link"}]}}
 			],"paging":{"cursors":{"after":"A"}}}`))
 		case "/v26.0/123_1", "/v26.0/123_2", "/v26.0/123_3", "/v26.0/123_4", "/v26.0/123_5":
 			w.Write([]byte(`{}`))
@@ -348,6 +350,18 @@ func TestFacebookHistoryKindsAndAccount(t *testing.T) {
 	}
 	if strings.Join(kinds, ",") != "text,image,carousel,video,text" || items[0].CreatedAt.Year() != 2026 {
 		t.Fatalf("kinds %v %v", kinds, items[0].CreatedAt)
+	}
+	wantVis := [][]providers.Visual{
+		nil,
+		{{URL: "https://fb.cdn/2.jpg"}},
+		{{URL: "https://fb.cdn/3a.jpg"}, {URL: "https://fb.cdn/3b-thumb.jpg", Cover: true}},
+		{{URL: "https://fb.cdn/4-thumb.jpg", Cover: true}},
+		{{URL: "https://fb.cdn/5-link.jpg"}}, // link preview through full_picture
+	}
+	for i, w := range wantVis {
+		if !reflect.DeepEqual(items[i].Visuals, w) {
+			t.Errorf("item %s visuals %+v want %+v", items[i].RemoteID, items[i].Visuals, w)
+		}
 	}
 	m, err := fb.AccountMetrics(ctx)
 	if err != nil || m["followers"] != 12 || m["page_likes"] != 10 {

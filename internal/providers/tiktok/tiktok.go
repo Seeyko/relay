@@ -601,9 +601,14 @@ type video struct {
 	LikeCount    int64  `json:"like_count"`
 	CommentCount int64  `json:"comment_count"`
 	ShareCount   int64  `json:"share_count"`
+	// CoverImageURL is a signed link to the video cover; TikTok says it expires within 6 hours.
+	CoverImageURL string `json:"cover_image_url"`
 }
 
 const videoFields = "id,title,video_description,create_time,share_url,view_count,like_count,comment_count,share_count"
+
+// historyFields adds the cover, so the import gets the visual in the same request.
+const historyFields = videoFields + ",cover_image_url"
 
 func (v video) metrics() map[string]int64 {
 	return map[string]int64{"view_count": v.ViewCount, "like_count": v.LikeCount, "comment_count": v.CommentCount, "share_count": v.ShareCount}
@@ -659,7 +664,7 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 			Cursor  int64   `json:"cursor"`
 			HasMore bool    `json:"has_more"`
 		}
-		if err := c.call(ctx, "POST", "/v2/video/list/?fields="+videoFields, body, &r); err != nil {
+		if err := c.call(ctx, "POST", "/v2/video/list/?fields="+historyFields, body, &r); err != nil {
 			return out, err
 		}
 		stop := false
@@ -673,7 +678,9 @@ func (c *Client) History(ctx context.Context, since time.Time, max int) ([]provi
 			if text == "" {
 				text = v.Title
 			}
-			out = append(out, providers.HistoryItem{RemoteID: v.ID, Text: text, URL: v.ShareURL, CreatedAt: t, Metrics: v.metrics(), Kind: "video"})
+			it := providers.HistoryItem{RemoteID: v.ID, Text: text, URL: v.ShareURL, CreatedAt: t, Metrics: v.metrics(), Kind: "video"}
+			it.AddVisual(v.CoverImageURL, true)
+			out = append(out, it)
 		}
 		if stop || !r.HasMore || len(r.Videos) == 0 || r.Cursor == cursor {
 			break

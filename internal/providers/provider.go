@@ -61,6 +61,30 @@ type HistoryItem struct {
 	Metrics   map[string]int64
 	// Kind classifies the post when the network tells us: text, image, video, carousel, reply, repost, quote, article.
 	Kind string
+	// Visuals are the post's images, in order: the photos of a photo post or carousel, the cover
+	// (thumbnail) of a video. Never the video file itself. The URLs are usually signed CDN links that
+	// expire, so Relay downloads them during the import.
+	Visuals []Visual
+}
+
+// Visual is one image of an imported post.
+type Visual struct {
+	URL string
+	// Cover is true when the image is the cover/thumbnail of a video, not a photo of the post.
+	Cover bool
+}
+
+// AddVisual appends a visual when its URL is set and not already listed.
+func (h *HistoryItem) AddVisual(url string, cover bool) {
+	if url == "" {
+		return
+	}
+	for _, v := range h.Visuals {
+		if v.URL == url {
+			return
+		}
+	}
+	h.Visuals = append(h.Visuals, Visual{URL: url, Cover: cover})
 }
 
 // Identity is what we learn about the account when it is connected.

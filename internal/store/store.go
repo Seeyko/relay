@@ -353,11 +353,13 @@ func (s *Store) CreatePost(ctx context.Context, p *Post) error {
 }
 
 // UpsertImported stores a post fetched from a network's history; existing rows only get metrics refreshed.
+// For an existing row, p.ID, p.Source and p.Media are set from the stored post.
 func (s *Store) UpsertImported(ctx context.Context, p *Post) (created bool, err error) {
-	var id string
-	err = s.db.QueryRowContext(ctx, `SELECT id FROM posts WHERE account_id=? AND remote_id=?`, p.AccountID, p.RemoteID).Scan(&id)
+	var id, source, media string
+	err = s.db.QueryRowContext(ctx, `SELECT id, source, media FROM posts WHERE account_id=? AND remote_id=?`, p.AccountID, p.RemoteID).Scan(&id, &source, &media)
 	if err == nil {
-		p.ID = id
+		p.ID, p.Source, p.Media = id, source, []string{}
+		_ = json.Unmarshal([]byte(media), &p.Media)
 		_, err = s.db.ExecContext(ctx, `UPDATE posts SET metrics=?, metrics_at=?, updated_at=? WHERE id=?`, js(p.Metrics), time.Now().UTC(), time.Now().UTC(), id)
 		return false, err
 	}
@@ -369,6 +371,17 @@ func (s *Store) UpsertImported(ctx context.Context, p *Post) (created bool, err 
 	now := time.Now().UTC()
 	p.MetricsAt = &now
 	return true, s.CreatePost(ctx, p)
+}
+
+// SetImportedMedia attaches media to an imported post that has none yet. It never touches a post
+// created in Relay nor one that already has media; it returns false when nothing was changed.
+func (s *Store) SetImportedMedia(ctx context.Context, postID string, media []string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE posts SET media=?, updated_at=? WHERE id=? AND source='imported' AND media IN ('[]','null','')`, js(media), time.Now().UTC(), postID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func (s *Store) UpdatePost(ctx context.Context, p *Post) error {
@@ -537,6 +550,12 @@ func (s *Store) CreateMedia(ctx context.Context, m *Media) error {
 	}
 	m.CreatedAt = time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO media(id,filename,mime,size,path,created_at) VALUES(?,?,?,?,?,?)`, m.ID, m.Filename, m.Mime, m.Size, m.Path, m.CreatedAt)
+	return err
+}
+
+// DeleteMedia removes a media row (the caller removes the file).
+func (s *Store) DeleteMedia(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM media WHERE id=?`, id)
 	return err
 }
 

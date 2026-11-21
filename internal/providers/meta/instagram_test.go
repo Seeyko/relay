@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -291,11 +292,12 @@ func TestInstagramHistory(t *testing.T) {
 		"GET /v26.0/ig1/media": func(q url.Values) string {
 			if q.Get("after") == "" {
 				return `{"data":[
-					{"id":"1","caption":"pic","media_type":"IMAGE","media_product_type":"FEED","permalink":"https://www.instagram.com/p/1/","timestamp":"2026-11-01T08:00:00+0000","like_count":5,"comments_count":1},
-					{"id":"2","media_type":"VIDEO","media_product_type":"REELS","timestamp":"2026-11-02T08:00:00+0000"}],
+					{"id":"1","caption":"pic","media_type":"IMAGE","media_product_type":"FEED","permalink":"https://www.instagram.com/p/1/","timestamp":"2026-11-01T08:00:00+0000","like_count":5,"comments_count":1,"media_url":"https://cdn.ig/1.jpg"},
+					{"id":"2","media_type":"VIDEO","media_product_type":"REELS","timestamp":"2026-11-02T08:00:00+0000","media_url":"https://cdn.ig/2.mp4","thumbnail_url":"https://cdn.ig/2.jpg"}],
 					"paging":{"cursors":{"after":"A"},"next":"https://graph.instagram.com/n"}}`
 			}
-			return `{"data":[{"id":"3","media_type":"CAROUSEL_ALBUM","media_product_type":"FEED","timestamp":"2026-11-03T08:00:00+0000"},
+			return `{"data":[{"id":"3","media_type":"CAROUSEL_ALBUM","media_product_type":"FEED","timestamp":"2026-11-03T08:00:00+0000","media_url":"https://cdn.ig/3a.jpg",
+					"children":{"data":[{"id":"3a","media_type":"IMAGE","media_url":"https://cdn.ig/3a.jpg"},{"id":"3b","media_type":"VIDEO","media_url":"https://cdn.ig/3b.mp4","thumbnail_url":"https://cdn.ig/3b.jpg"}]}},
 				{"id":"4","media_type":"VIDEO","media_product_type":"FEED","timestamp":"2026-11-03T09:00:00+0000"}]}`
 		},
 	})
@@ -316,8 +318,19 @@ func TestInstagramHistory(t *testing.T) {
 		!items[0].CreatedAt.Equal(time.Date(2026, 11, 1, 8, 0, 0, 0, time.UTC)) {
 		t.Fatalf("item %+v", items[0])
 	}
+	wantVis := [][]providers.Visual{
+		{{URL: "https://cdn.ig/1.jpg"}},
+		{{URL: "https://cdn.ig/2.jpg", Cover: true}},
+		{{URL: "https://cdn.ig/3a.jpg"}, {URL: "https://cdn.ig/3b.jpg", Cover: true}},
+		nil, // no thumbnail_url: nothing, and never the video file
+	}
+	for i, w := range wantVis {
+		if !reflect.DeepEqual(items[i].Visuals, w) {
+			t.Errorf("item %s visuals %+v want %+v", items[i].RemoteID, items[i].Visuals, w)
+		}
+	}
 	expect(t, f.form("GET /v26.0/ig1/media", 0), map[string]string{
-		"fields": "id,caption,media_type,permalink,timestamp,like_count,comments_count,media_product_type", "limit": "100", "since": "1790812800"})
+		"fields": "id,caption,media_type,permalink,timestamp,like_count,comments_count,media_url,thumbnail_url,children{media_type,media_url,thumbnail_url},media_product_type", "limit": "100", "since": "1790812800"})
 	expect(t, f.form("GET /v26.0/ig1/media", 1), map[string]string{"after": "A"})
 	if igKind("IMAGE", "STORY") != "story" {
 		t.Fatal("story kind")
@@ -327,15 +340,19 @@ func TestInstagramHistory(t *testing.T) {
 func TestInstagramHistoryFieldFallback(t *testing.T) {
 	f := newFakeIG(t, map[string]func(url.Values) string{
 		"GET /v26.0/ig1/media": func(q url.Values) string {
-			if strings.Contains(q.Get("fields"), "media_product_type") {
+			if strings.Contains(q.Get("fields"), "media_product_type") || strings.Contains(q.Get("fields"), "children") {
 				return `400 {"error":{"message":"(#100) Tried accessing nonexisting field (media_product_type)","code":100}}`
 			}
-			return `{"data":[{"id":"1","media_type":"CAROUSEL_ALBUM","timestamp":"2026-11-03T08:00:00+0000"}]}`
+			return `{"data":[{"id":"1","media_type":"CAROUSEL_ALBUM","timestamp":"2026-11-03T08:00:00+0000"}],"paging":{"cursors":{"after":"A"},"next":"n"}}`
 		},
 	})
-	items, err := newTestIG(t, f, nil, nil).History(context.Background(), time.Time{}, 10)
-	if err != nil || len(items) != 1 || items[0].Kind != "carousel" {
+	items, err := newTestIG(t, f, nil, nil).History(context.Background(), time.Time{}, 2)
+	if err != nil || len(items) != 2 || items[0].Kind != "carousel" {
 		t.Fatalf("%v %+v", err, items)
+	}
+	// The second page goes straight to the field set that worked.
+	if n := f.count("GET /v26.0/ig1/media"); n != 4 {
+		t.Fatalf("want 3 tries + 1 page, got %d calls", n)
 	}
 }
 
