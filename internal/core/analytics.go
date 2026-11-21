@@ -116,10 +116,19 @@ type AnalyzeInput struct {
 	Location  *time.Location
 	// IncludeReposts keeps reposts (RTs) in the analysis; their counters belong to someone else.
 	IncludeReposts bool
+	// Filter narrows the posts (networks, accounts, formats, hashtags, text, links, media).
+	Filter Filter
+	// Compare: "previous" (default, the period just before, same length), "previous_year"
+	// (same dates one year earlier) or "none".
+	Compare string
+	// Basis: "published" (default): posts published in the period, with their lifetime counters.
+	// "activity": what every post (whenever published) gained during the period, from snapshots.
+	Basis string
 }
 
 type GroupRow struct {
 	Key            string           `json:"key"`
+	Keys           []string         `json:"keys,omitempty"` // one value per group_by dimension when there are several
 	Posts          int              `json:"posts"`
 	Totals         map[string]int64 `json:"totals"`
 	Avg            float64          `json:"avg"`
@@ -144,16 +153,23 @@ type Analysis struct {
 		Since time.Time `json:"since"`
 		Until time.Time `json:"until"`
 	} `json:"period"`
-	Metric   string            `json:"metric"`
-	GroupBy  string            `json:"group_by"`
-	Posts    int               `json:"posts"`
-	Totals   map[string]int64  `json:"totals"`
-	Previous map[string]int64  `json:"previous_period_totals"`
-	Change   map[string]string `json:"change_vs_previous"`
-	Groups   []GroupRow        `json:"groups,omitempty"`
-	Top      []RankedPost      `json:"top"`
-	Bottom   []RankedPost      `json:"bottom"`
-	Notes    []string          `json:"notes,omitempty"`
+	Metric   string           `json:"metric"`
+	GroupBy  string           `json:"group_by"`
+	Basis    string           `json:"basis"`
+	Compare  string           `json:"compare"`
+	Filters  map[string]any   `json:"filters,omitempty"`
+	Posts    int              `json:"posts"`
+	Totals   map[string]int64 `json:"totals"`
+	Previous map[string]int64 `json:"previous_period_totals,omitempty"`
+	PrevPer  *struct {
+		Since time.Time `json:"since"`
+		Until time.Time `json:"until"`
+	} `json:"previous_period,omitempty"`
+	Change map[string]string `json:"change_vs_previous"`
+	Groups []GroupRow        `json:"groups,omitempty"`
+	Top    []RankedPost      `json:"top"`
+	Bottom []RankedPost      `json:"bottom"`
+	Notes  []string          `json:"notes,omitempty"`
 }
 
 type enriched struct {
@@ -185,6 +201,9 @@ func (s *Service) loadEnriched(ctx context.Context, in AnalyzeInput, since, unti
 			if a == nil || (in.Provider != "" && a.Provider != in.Provider) {
 				continue
 			}
+			if p.PublishedAt != nil && !p.PublishedAt.Before(until) {
+				continue
+			}
 			e := enriched{p: p, provider: a.Provider, account: a.Handle, norm: Normalize(p.Metrics), format: Format(p, a.Provider)}
 			if e.account == "" {
 				e.account = a.Name
@@ -193,6 +212,9 @@ func (s *Service) loadEnriched(ctx context.Context, in AnalyzeInput, since, unti
 				e.text = strings.Join(p.Parts, "\n")
 			}
 			if e.format == "repost" && !in.IncludeReposts {
+				continue
+			}
+			if !in.Filter.match(e, a.ID) {
 				continue
 			}
 			out = append(out, e)
@@ -233,13 +255,41 @@ func totals(es []enriched) map[string]int64 {
 	return t
 }
 
+// groupKeys returns the group keys of a post. by may list several dimensions separated by
+// commas ("network,month"): keys are then the cross product, joined with " | ".
 func (s *Service) groupKeys(e enriched, by string, loc *time.Location) []string {
+	dims := strings.Split(by, ",")
+	if len(dims) == 1 {
+		return s.groupKeys1(e, strings.TrimSpace(by), loc)
+	}
+	keys := []string{""}
+	for _, d := range dims {
+		ks := s.groupKeys1(e, strings.TrimSpace(d), loc)
+		if ks == nil {
+			return nil
+		}
+		var next []string
+		for _, prefix := range keys {
+			for _, k := range ks {
+				if prefix == "" {
+					next = append(next, k)
+				} else {
+					next = append(next, prefix+" | "+k)
+				}
+			}
+		}
+		keys = next
+	}
+	return keys
+}
+
+func (s *Service) groupKeys1(e enriched, by string, loc *time.Location) []string {
 	at := time.Time{}
 	if e.p.PublishedAt != nil {
 		at = e.p.PublishedAt.In(loc)
 	}
 	switch by {
-	case "network":
+	case "network", "provider":
 		return []string{e.provider}
 	case "account":
 		return []string{e.provider + ":" + e.account}
@@ -283,6 +333,19 @@ func (s *Service) groupKeys(e enriched, by string, loc *time.Location) []string 
 
 var GroupByOptions = []string{"network", "account", "day", "week", "month", "weekday", "hour", "format", "length", "hashtag", "has_link"}
 
+// loadFor loads the posts of a period according to the basis.
+func (s *Service) loadFor(ctx context.Context, in AnalyzeInput, since, until time.Time) ([]enriched, int, error) {
+	if in.Basis != "activity" {
+		es, err := s.loadEnriched(ctx, in, since, until)
+		return es, 0, err
+	}
+	all, err := s.loadEnriched(ctx, in, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), until)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.activity(ctx, all, since, until)
+}
+
 // Analyze computes cross-network performance over a period, compared with the previous period of equal length.
 func (s *Service) Analyze(ctx context.Context, in AnalyzeInput) (*Analysis, error) {
 	if in.Metric == "" {
@@ -303,19 +366,56 @@ func (s *Service) Analyze(ctx context.Context, in AnalyzeInput) (*Analysis, erro
 		since = until.Add(-30 * 24 * time.Hour)
 	}
 	if in.GroupBy != "" && s.groupKeys(enriched{p: &store.Post{}}, in.GroupBy, time.UTC) == nil {
-		return nil, invalid("group_by must be one of %s", strings.Join(GroupByOptions, ", "))
+		return nil, invalid("group_by must be one or more (comma separated) of %s", strings.Join(GroupByOptions, ", "))
 	}
-	cur, err := s.loadEnriched(ctx, in, since, until)
+	switch in.Basis {
+	case "":
+		in.Basis = "published"
+	case "published", "activity":
+	default:
+		return nil, invalid("basis must be published or activity")
+	}
+	switch in.Compare {
+	case "":
+		in.Compare = "previous"
+	case "previous", "previous_year", "none":
+	default:
+		return nil, invalid("compare must be previous, previous_year or none")
+	}
+	if !since.Before(until) {
+		return nil, invalid("since must be before until")
+	}
+	cur, missing, err := s.loadFor(ctx, in, since, until)
 	if err != nil {
 		return nil, err
 	}
-	prev, err := s.loadEnriched(ctx, in, since.Add(-until.Sub(since)), since)
-	if err != nil {
-		return nil, err
-	}
-	a := &Analysis{Metric: in.Metric, GroupBy: in.GroupBy, Posts: len(cur), Totals: totals(cur), Previous: totals(prev), Change: map[string]string{}}
+	a := &Analysis{Metric: in.Metric, GroupBy: in.GroupBy, Basis: in.Basis, Compare: in.Compare, Filters: in.Filter.describe(in), Posts: len(cur), Totals: totals(cur), Change: map[string]string{}}
 	a.Period.Since, a.Period.Until = since, until
+	var prev []enriched
+	if in.Compare != "none" {
+		ps, pu := since.Add(-until.Sub(since)), since
+		if in.Compare == "previous_year" {
+			ps, pu = since.AddDate(-1, 0, 0), until.AddDate(-1, 0, 0)
+		}
+		if prev, _, err = s.loadFor(ctx, in, ps, pu); err != nil {
+			return nil, err
+		}
+		a.Previous = totals(prev)
+		a.PrevPer = &struct {
+			Since time.Time `json:"since"`
+			Until time.Time `json:"until"`
+		}{ps, pu}
+	}
+	if missing > 0 {
+		a.Notes = append(a.Notes, fmt.Sprintf("basis=activity: %d post(s) have no metric snapshot before the period (Relay was not measuring them yet), their activity is not counted", missing))
+	}
+	if in.Basis == "published" {
+		a.Notes = append(a.Notes, "basis=published: totals are the lifetime counters of posts published in the period, not what happened during it (use basis=activity for that)")
+	}
 	for _, k := range NormalizedMetrics {
+		if in.Compare == "none" {
+			break
+		}
 		p, c := a.Previous[k], a.Totals[k]
 		switch {
 		case p > 0:
@@ -324,7 +424,10 @@ func (s *Service) Analyze(ctx context.Context, in AnalyzeInput) (*Analysis, erro
 			a.Change[k] = "new"
 		}
 	}
-	a.Totals["posts"], a.Previous["posts"] = int64(len(cur)), int64(len(prev))
+	a.Totals["posts"] = int64(len(cur))
+	if a.Previous != nil {
+		a.Previous["posts"] = int64(len(prev))
+	}
 
 	missingViews := map[string]bool{}
 	var ranked []RankedPost
@@ -357,6 +460,9 @@ func (s *Service) Analyze(ctx context.Context, in AnalyzeInput) (*Analysis, erro
 		}
 		for k, es := range groups {
 			row := GroupRow{Key: k, Posts: len(es), Totals: totals(es)}
+			if strings.Contains(in.GroupBy, ",") {
+				row.Keys = strings.Split(k, " | ")
+			}
 			var vals []float64
 			for _, e := range es {
 				if v, ok := value(e, in.Metric); ok {
@@ -395,7 +501,13 @@ func (s *Service) Analyze(ctx context.Context, in AnalyzeInput) (*Analysis, erro
 }
 
 func timeOrdered(by string) bool {
-	return by == "day" || by == "week" || by == "month" || by == "weekday" || by == "hour"
+	for _, d := range strings.Split(by, ",") {
+		switch strings.TrimSpace(d) {
+		case "day", "week", "month", "weekday", "hour":
+			return true
+		}
+	}
+	return false
 }
 
 func mean(v []float64) float64 {
