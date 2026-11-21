@@ -35,6 +35,13 @@ func strs(desc string) map[string]any {
 }
 func num(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }
 
+type sourceKey struct{}
+
+// WithSource tags a call with its origin (rest or mcp), recorded on feedback.
+func WithSource(ctx context.Context, src string) context.Context {
+	return context.WithValue(ctx, sourceKey{}, src)
+}
+
 // list decodes a JSON array of strings or a comma separated string (REST query strings).
 type list []string
 
@@ -371,6 +378,97 @@ func BuildTools(svc *core.Service) []Tool {
 					}
 				}
 				return svc.Analyze(ctx, in)
+			},
+		},
+		{
+			Name: "submit_feedback",
+			Description: "Tell Relay's maintainers what is missing or broken. Use it whenever the user asks for something this API/MCP cannot do " +
+				"(missing tool, filter, network, post option, metric...) or when a tool misbehaves. Write the full context: the user's request in their words, " +
+				"what you tried (tools and arguments), what happened, and what would have solved it. Attach screenshots or examples with media (ids from " +
+				"upload_media_from_url / POST /v1/media) or media_urls. Agents that maintain Relay read open feedback and open pull requests. " +
+				"Returns the feedback id; check it later with get_feedback.",
+			InputSchema: obj(map[string]any{
+				"kind":       str("missing_feature (default), bug, improvement or other"),
+				"title":      str("One line, max 200 characters"),
+				"body":       str("Full text (Markdown): user request, what you tried, what happened, what is needed"),
+				"media":      strs("Media ids (screenshots, example files)"),
+				"media_urls": strs("http(s) URLs Relay downloads into its media library"),
+				"context":    map[string]any{"type": "object", "description": "Optional structured context: tool, arguments, provider, error, client name..."},
+			}, "title", "body"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					Kind      string         `json:"kind"`
+					Title     string         `json:"title"`
+					Body      string         `json:"body"`
+					Media     list           `json:"media"`
+					MediaURLs list           `json:"media_urls"`
+					Context   map[string]any `json:"context"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				src := "mcp"
+				if s, ok := ctx.Value(sourceKey{}).(string); ok {
+					src = s
+				}
+				return svc.SubmitFeedback(ctx, core.FeedbackInput{Kind: a.Kind, Title: a.Title, Body: a.Body, Media: a.Media, MediaURLs: a.MediaURLs, Context: a.Context, Source: src, Role: string(RoleFrom(ctx))})
+			},
+		},
+		{
+			Name:        "get_feedback",
+			Description: "Read one feedback with its status (open, triaged, in_progress, done, rejected, duplicate), resolution and pull request URL.",
+			InputSchema: obj(map[string]any{"id": str("Feedback id")}, "id"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct{ ID string }](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.Store.GetFeedback(ctx, a.ID)
+			},
+		},
+		{
+			Name:        "list_feedback",
+			Description: "List feedback, oldest first, for the agents that maintain Relay. Default: status open.",
+			Admin:       true,
+			InputSchema: obj(map[string]any{"status": strs("Statuses to include (open, triaged, in_progress, done, rejected, duplicate) or [\"all\"]; default open"), "limit": num("default 100, max 500")}),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					Status list `json:"status"`
+					Limit  int  `json:"limit"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				st := []string(a.Status)
+				if len(st) == 0 {
+					st = []string{"open"}
+				}
+				if len(st) == 1 && st[0] == "all" {
+					st = nil
+				}
+				fs, err := svc.Store.ListFeedback(ctx, st, a.Limit)
+				if fs == nil && err == nil {
+					fs = []*store.Feedback{}
+				}
+				return fs, err
+			},
+		},
+		{
+			Name:        "update_feedback",
+			Description: "Move a feedback through its workflow (triaged, in_progress, done, rejected, duplicate) with a resolution note and the pull request URL.",
+			Admin:       true,
+			InputSchema: obj(map[string]any{"id": str(""), "status": str(""), "resolution": str("What was done or why not"), "pr_url": str("https URL of the pull request")}, "id"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					ID         string `json:"id"`
+					Status     string `json:"status"`
+					Resolution string `json:"resolution"`
+					PRURL      string `json:"pr_url"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.UpdateFeedback(ctx, a.ID, a.Status, a.Resolution, a.PRURL)
 			},
 		},
 		{

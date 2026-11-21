@@ -35,7 +35,10 @@ func (s *Server) Tools() []Tool { return s.tools }
 
 func (s *Server) instructions() string {
 	txt := "Relay manages social accounts and websites without a UI. Start with list_accounts. " +
-		"Times are RFC3339 with an explicit UTC offset. Never publish without the user's go-ahead: prefer scheduled_at='draft' when unsure."
+		"Times are RFC3339 with an explicit UTC offset. Never publish without the user's go-ahead: prefer scheduled_at='draft' when unsure. " +
+		"When the user asks for something Relay cannot do (a missing tool, filter, network, option or a bug), do not give up silently: " +
+		"call submit_feedback with the user's request, what you tried and what is missing (plus screenshots or examples as media). " +
+		"The maintainers' agents read it and open a pull request."
 	if s.ExtraInstructions != "" {
 		txt += " " + s.ExtraInstructions
 	}

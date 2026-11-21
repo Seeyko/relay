@@ -149,7 +149,10 @@ CREATE TABLE IF NOT EXISTS ui_sessions (
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(feedbackSchema)
 	return err
 }
 
@@ -859,6 +862,7 @@ account_snapshots(account_id, at, metrics JSON)  -- followers, following, posts 
 comments(account_id, remote_id, post_id, author, text, url, created_at, seen_at, replied 0|1)
 media(id, filename, mime, size, created_at)
 agent_tasks(id, account_id, kind, payload JSON, status, result, created_at, claimed_at, done_at)
+feedback(id, kind, title, body, media JSON, context JSON, source, role, status, resolution, pr_url, created_at, updated_at)
 Use json_extract(metrics, '$.like_count') to read a metric.`
 
 // ---------- dashboard passkeys and sessions ----------
