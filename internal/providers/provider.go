@@ -92,6 +92,8 @@ type Identity struct {
 	RemoteUserID string
 	Handle       string
 	Name         string
+	// AvatarURL is the profile picture when the identity call returns it (often a signed CDN link).
+	AvatarURL string
 }
 
 // Client is a connector bound to one account's credentials.
@@ -109,6 +111,15 @@ type Client interface {
 // followers, following, posts, likes_total, views_total.
 type AccountStatser interface {
 	AccountMetrics(ctx context.Context) (map[string]int64, error)
+}
+
+// Avatarer is implemented by clients that can give the account's profile picture (or Page logo).
+// AvatarURL returns a downloadable image URL, usually a CDN link that expires: Relay downloads it.
+// "" with a nil error means the network has no picture for the account, or the token lacks the scope.
+// Clients reuse the URL seen by an earlier Identify or AccountMetrics call when they can, so the
+// daily refresh costs no extra request.
+type Avatarer interface {
+	AvatarURL(ctx context.Context) (string, error)
 }
 
 // Factory builds a client from decrypted credentials. persist lets a client save refreshed tokens.

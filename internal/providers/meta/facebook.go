@@ -128,6 +128,25 @@ func (f *Facebook) AccountMetrics(ctx context.Context) (map[string]int64, error)
 	return map[string]int64{"followers": r.Followers, "page_likes": r.Fans}, nil
 }
 
+// AvatarURL is the Page profile picture: GET /{page-id}/picture?type=large&redirect=false answers
+// {"data": {"url", "is_silhouette"}} instead of redirecting to the image. A silhouette is Facebook's
+// placeholder for a Page without a picture: there is none then.
+func (f *Facebook) AvatarURL(ctx context.Context) (string, error) {
+	var r struct {
+		Data struct {
+			URL          string `json:"url"`
+			IsSilhouette bool   `json:"is_silhouette"`
+		} `json:"data"`
+	}
+	if err := f.g.get(ctx, "/"+f.PageID+"/picture", url.Values{"type": {"large"}, "redirect": {"false"}}, &r); err != nil {
+		return "", err
+	}
+	if r.Data.IsSilhouette {
+		return "", nil
+	}
+	return r.Data.URL, nil
+}
+
 func (f *Facebook) permalink(ctx context.Context, id, fallback string) string {
 	var r struct {
 		PermalinkURL string `json:"permalink_url"`

@@ -123,7 +123,7 @@ func TestTokenRefreshRotates(t *testing.T) {
 	if creds["refresh_token"] != "RT2" || creds["access_token"] != "AT2" || creds["refresh_expires_at"] == "" {
 		t.Errorf("creds not rotated: %v", creds["refresh_token"])
 	}
-	if q := f.find("GET /v2/user/info/")[0].Query; q != "fields=open_id,display_name,username" {
+	if q := f.find("GET /v2/user/info/")[0].Query; q != "fields=open_id,display_name,username,avatar_large_url,avatar_url_100" {
 		t.Errorf("query %q", q)
 	}
 }

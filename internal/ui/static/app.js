@@ -508,6 +508,12 @@ function renderAccount(pp, tz) {
   // The network mockup carries the name, the time and the counters; around it only what it cannot show.
   const head = el("div", "pv-head" + (drawn ? " slim" : ""));
   if (!drawn) head.append(netIcon({ provider: prov }));
+  if (!drawn && pp.account_avatar) {
+    const av = el("img", "pv-av");
+    av.src = pp.account_avatar; av.alt = ""; av.decoding = "async";
+    av.addEventListener("error", () => av.remove(), { once: true });
+    head.append(av);
+  }
   const name = el("div", "pv-name");
   if (!drawn) name.append(el("b", "", pp.account && pp.account.handle ? "@" + pp.account.handle : NET_NAMES[prov] || prov || "?"));
   const when = whenText(p, tz);

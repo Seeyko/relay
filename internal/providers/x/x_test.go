@@ -332,14 +332,35 @@ func TestHistoryKinds(t *testing.T) {
 
 func TestAccountMetrics(t *testing.T) {
 	c, calls := fakeX(t, func(cl call, w http.ResponseWriter) {
-		w.Write([]byte(`{"data":{"id":"42","public_metrics":{"followers_count":5,"following_count":6,"tweet_count":7,"listed_count":1,"like_count":99}}}`))
+		w.Write([]byte(`{"data":{"id":"42","profile_image_url":"https://pbs.twimg.com/profile_images/1/a_normal.jpg","public_metrics":{"followers_count":5,"following_count":6,"tweet_count":7,"listed_count":1,"like_count":99}}}`))
 	})
 	m, err := c.AccountMetrics(context.Background())
 	if err != nil || m["followers"] != 5 || m["following"] != 6 || m["posts"] != 7 {
 		t.Fatalf("%v %v", m, err)
 	}
-	if (*calls)[0].Path != "/2/users/me" || (*calls)[0].Query.Get("user.fields") != "public_metrics" {
+	if (*calls)[0].Path != "/2/users/me" || (*calls)[0].Query.Get("user.fields") != "public_metrics,profile_image_url" {
 		t.Fatal("bad request")
+	}
+	// The picture comes from the same call, in its 400x400 size.
+	if u, err := c.AvatarURL(context.Background()); err != nil || u != "https://pbs.twimg.com/profile_images/1/a_400x400.jpg" || len(*calls) != 1 {
+		t.Fatalf("avatar %q %v (%d calls)", u, err, len(*calls))
+	}
+}
+
+// Without an earlier call, AvatarURL asks /2/users/me for profile_image_url.
+func TestAvatarLookup(t *testing.T) {
+	c, calls := fakeX(t, func(cl call, w http.ResponseWriter) {
+		w.Write([]byte(`{"data":{"id":"42","name":"A","username":"alice","profile_image_url":"https://pbs.twimg.com/profile_images/1/b_normal.png"}}`))
+	})
+	u, err := c.AvatarURL(context.Background())
+	if err != nil || u != "https://pbs.twimg.com/profile_images/1/b_400x400.png" {
+		t.Fatalf("avatar %q %v", u, err)
+	}
+	if (*calls)[0].Path != "/2/users/me" || (*calls)[0].Query.Get("user.fields") != "profile_image_url" {
+		t.Fatalf("request %+v", (*calls)[0])
+	}
+	if largeAvatar("https://x/y_normal") != "https://x/y_normal" || largeAvatar("") != "" {
+		t.Fatal("largeAvatar changed a URL without an extension")
 	}
 }
 

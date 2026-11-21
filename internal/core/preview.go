@@ -42,6 +42,9 @@ type PreviewMedia struct {
 type PostPreview struct {
 	Post    *store.Post    `json:"post"`
 	Account *store.Account `json:"account,omitempty"`
+	// AccountAvatar is the account's profile picture as /media/<file> ("" when Relay has none: the
+	// dashboard then draws the first letter of the name).
+	AccountAvatar string `json:"account_avatar,omitempty"`
 	// Layout says how the network lays the post out: thread (X, Threads), caption (Instagram, Facebook,
 	// TikTok), video (YouTube), post_comments (LinkedIn: extra parts become comments), article (website).
 	Layout   string         `json:"layout"`
@@ -140,6 +143,9 @@ func (s *Service) timezone() string {
 // PreviewPost builds the preview of one post. acc may be nil (account deleted).
 func (s *Service) PreviewPost(ctx context.Context, p *store.Post, acc *store.Account) PostPreview {
 	pv := PostPreview{Post: p, Account: acc, Media: []PreviewMedia{}, Problems: []string{}}
+	if acc != nil {
+		pv.AccountAvatar = acc.Avatar
+	}
 	if p.Status == store.StatusPublished {
 		pv.Stats = PublicStats(p.Metrics)
 	}

@@ -77,6 +77,9 @@ func (a *API) Handler() http.Handler {
 		w.WriteHeader(204)
 	})
 	authed.HandleFunc("POST /v1/accounts/{id}/import", a.tool("import_history", map[string]string{"id": "account_id"}))
+	// Profile pictures: {"media": "<id>"} or {"media_url": "https://..."}, or {"clear": true}.
+	authed.HandleFunc("PUT /v1/accounts/{id}/avatar", a.tool("set_account_avatar", map[string]string{"id": "account_id"}))
+	authed.HandleFunc("PUT /v1/accounts/avatar", a.toolWith("set_account_avatar", nil, map[string]any{"account_id": "all"}))
 
 	authed.HandleFunc("GET /v1/posts", a.tool("list_posts", nil))
 	authed.HandleFunc("POST /v1/posts", a.tool("schedule_post", nil))
@@ -205,6 +208,11 @@ func body(r *http.Request) []byte {
 
 // tool builds a handler whose arguments are the JSON body, merged with query params and path values.
 func (a *API) tool(name string, pathArgs map[string]string) http.HandlerFunc {
+	return a.toolWith(name, pathArgs, nil)
+}
+
+// toolWith is tool with fixed arguments that win over the request's.
+func (a *API) toolWith(name string, pathArgs map[string]string, fixed map[string]any) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		args := map[string]any{}
 		if b := body(r); len(b) > 0 {
@@ -225,6 +233,9 @@ func (a *API) tool(name string, pathArgs map[string]string) http.HandlerFunc {
 		}
 		for p, arg := range pathArgs {
 			args[arg] = r.PathValue(p)
+		}
+		for k, v := range fixed {
+			args[k] = v
 		}
 		raw, _ := json.Marshal(args)
 		a.call(w, r.WithContext(mcp.WithSource(r.Context(), "rest")), name, raw)

@@ -134,11 +134,13 @@ func WeightedLength(s string) int {
 	return n
 }
 
-// AccountMetrics returns follower and post counts (GET /2/users/me, user.fields=public_metrics).
+// AccountMetrics returns follower and post counts (GET /2/users/me, user.fields=public_metrics). The same
+// call reads profile_image_url, kept for AvatarURL.
 func (c *Client) AccountMetrics(ctx context.Context) (map[string]int64, error) {
 	var r struct {
 		Data struct {
-			PublicMetrics struct {
+			ProfileImageURL string `json:"profile_image_url"`
+			PublicMetrics   struct {
 				Followers int64 `json:"followers_count"`
 				Following int64 `json:"following_count"`
 				Tweets    int64 `json:"tweet_count"`
@@ -146,9 +148,10 @@ func (c *Client) AccountMetrics(ctx context.Context) (map[string]int64, error) {
 			} `json:"public_metrics"`
 		} `json:"data"`
 	}
-	if err := c.do(ctx, "GET", "/2/users/me?user.fields=public_metrics", nil, &r); err != nil {
+	if err := c.do(ctx, "GET", "/2/users/me?user.fields=public_metrics,profile_image_url", nil, &r); err != nil {
 		return nil, err
 	}
+	c.avatar = largeAvatar(r.Data.ProfileImageURL)
 	m := r.Data.PublicMetrics
 	return map[string]int64{"followers": m.Followers, "following": m.Following, "posts": m.Tweets, "listed": m.Listed}, nil
 }
@@ -159,6 +162,7 @@ type Client struct {
 	Auth     *OAuth1
 	userID   string
 	username string
+	avatar   string // profile picture seen by the last Identify or AccountMetrics call
 	// PollInterval for video processing status (overridable in tests).
 	PollInterval time.Duration
 }
@@ -222,13 +226,36 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 
 func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 	var r struct {
-		Data struct{ ID, Name, Username string } `json:"data"`
+		Data struct {
+			ID, Name, Username string
+			ProfileImageURL    string `json:"profile_image_url"`
+		} `json:"data"`
 	}
-	if err := c.do(ctx, "GET", "/2/users/me", nil, &r); err != nil {
+	if err := c.do(ctx, "GET", "/2/users/me?user.fields=profile_image_url", nil, &r); err != nil {
 		return nil, err
 	}
 	c.userID, c.username = r.Data.ID, r.Data.Username
-	return &providers.Identity{RemoteUserID: r.Data.ID, Handle: r.Data.Username, Name: r.Data.Name}, nil
+	c.avatar = largeAvatar(r.Data.ProfileImageURL)
+	return &providers.Identity{RemoteUserID: r.Data.ID, Handle: r.Data.Username, Name: r.Data.Name, AvatarURL: c.avatar}, nil
+}
+
+// AvatarURL is the profile picture (GET /2/users/me, user.fields=profile_image_url), 400x400.
+func (c *Client) AvatarURL(ctx context.Context) (string, error) {
+	if c.avatar != "" {
+		return c.avatar, nil
+	}
+	if _, err := c.Identify(ctx); err != nil {
+		return "", err
+	}
+	return c.avatar, nil
+}
+
+// largeAvatar turns the 48x48 profile_image_url (..._normal.jpg) into its 400x400 variant.
+func largeAvatar(u string) string {
+	if i := strings.LastIndex(u, "_normal."); i >= 0 {
+		return u[:i] + "_400x400." + u[i+len("_normal."):]
+	}
+	return u
 }
 
 func statusURL(user, id string) string {

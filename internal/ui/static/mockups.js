@@ -69,13 +69,22 @@ function hueOf(s) {
   for (const ch of s) h = (h * 31 + ch.codePointAt(0)) % 360;
   return h;
 }
+// The account's profile picture (c.av, a /media/ path), or the first letter of its name on a colored
+// circle when Relay has none or the image does not load. "sq" draws it square-rounded (LinkedIn Page logos).
 function avatar(c, size, cls) {
   const a = el("span", "nw-av" + (cls ? " " + cls : ""));
   a.style.setProperty("--s", size + "px");
   // One color per brand whatever the network spells it: "Ride My Park", "RideMyPark", "@ridemypark".
   a.style.setProperty("--h", String(hueOf((c.name || c.handle || "?").toLowerCase().replace(/[^\p{L}\p{N}]/gu, ""))));
-  a.textContent = Array.from((c.name || c.handle || "?").trim())[0].toUpperCase();
+  const letter = () => { a.classList.remove("pic"); a.textContent = Array.from((c.name || c.handle || "?").trim())[0].toUpperCase(); };
   a.setAttribute("aria-hidden", "true");
+  if (!c.av) { letter(); return a; }
+  const i = el("img");
+  i.alt = ""; i.decoding = "async"; i.draggable = false;
+  i.addEventListener("error", letter, { once: true });
+  i.src = c.av;
+  a.classList.add("pic");
+  a.append(i);
   return a;
 }
 
@@ -611,6 +620,7 @@ function netMock(pp, tz, live) {
     pp, tz, live, kind,
     name: acc.name || bare(acc.handle) || NET_NAMES[acc.provider],
     handle: acc.handle || acc.name || "",
+    av: pp.account_avatar || acc.avatar || "",
     st: (live && pp.stats) || {},
     media: pp.media,
     video: vids > 0 || ["video", "reel", "short"].includes(kind),

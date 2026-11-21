@@ -359,22 +359,39 @@ func TestInstagramHistoryFieldFallback(t *testing.T) {
 func TestInstagramIdentifyAndAccountMetrics(t *testing.T) {
 	f := newFakeIG(t, map[string]func(url.Values) string{
 		"GET /v26.0/me": func(q url.Values) string {
-			if q.Get("fields") == "followers_count,follows_count,media_count" {
-				return `{"followers_count":1200,"follows_count":80,"media_count":42}`
+			if q.Get("fields") == "followers_count,follows_count,media_count,profile_picture_url" {
+				return `{"followers_count":1200,"follows_count":80,"media_count":42,"profile_picture_url":"https://cdn.ig/new.jpg"}`
 			}
-			return `{"id":"app1","user_id":"ig9","username":"alice","name":"Alice"}`
+			return `{"id":"app1","user_id":"ig9","username":"alice","name":"Alice","profile_picture_url":"https://cdn.ig/p.jpg"}`
 		},
 	})
 	ig := newTestIG(t, f, map[string]string{"user_id": "", "username": ""}, nil)
 	id, err := ig.Identify(context.Background())
-	if err != nil || id.RemoteUserID != "ig9" || id.Handle != "alice" || id.Name != "Alice" {
+	if err != nil || id.RemoteUserID != "ig9" || id.Handle != "alice" || id.Name != "Alice" || id.AvatarURL != "https://cdn.ig/p.jpg" {
 		t.Fatalf("identify %v %+v", err, id)
 	}
-	expect(t, f.form("GET /v26.0/me", 0), map[string]string{"fields": "id,user_id,username,name"})
+	expect(t, f.form("GET /v26.0/me", 0), map[string]string{"fields": "id,user_id,username,name,profile_picture_url"})
 	m, err := ig.AccountMetrics(context.Background())
 	if err != nil || m["followers"] != 1200 || m["following"] != 80 || m["posts"] != 42 {
 		t.Fatalf("account %v %v", err, m)
 	}
+	// The picture read by the counters call is reused: no extra request.
+	n := f.count("GET /v26.0/me")
+	if u, err := ig.AvatarURL(context.Background()); err != nil || u != "https://cdn.ig/new.jpg" || f.count("GET /v26.0/me") != n {
+		t.Fatalf("avatar %q %v (calls %d -> %d)", u, err, n, f.count("GET /v26.0/me"))
+	}
+}
+
+// A fresh client asks /me for the picture when no earlier call returned it.
+func TestInstagramAvatarLookup(t *testing.T) {
+	f := newFakeIG(t, map[string]func(url.Values) string{
+		"GET /v26.0/me": static(`{"id":"app1","user_id":"ig9","username":"alice","profile_picture_url":"https://cdn.ig/p.jpg"}`),
+	})
+	ig := newTestIG(t, f, nil, nil)
+	if u, err := ig.AvatarURL(context.Background()); err != nil || u != "https://cdn.ig/p.jpg" {
+		t.Fatalf("avatar %q %v", u, err)
+	}
+	expect(t, f.form("GET /v26.0/me", 0), map[string]string{"fields": "id,user_id,username,name,profile_picture_url"})
 }
 
 func TestInstagramFacebookLogin(t *testing.T) {
@@ -385,13 +402,13 @@ func TestInstagramFacebookLogin(t *testing.T) {
 			if q.Get("access_token") != "pagetok" {
 				t.Errorf("token %q", q.Get("access_token"))
 			}
-			if q.Get("fields") == "followers_count,follows_count,media_count" {
-				return `{"followers_count":900,"follows_count":3,"media_count":61}`
+			if q.Get("fields") == "followers_count,follows_count,media_count,profile_picture_url" {
+				return `{"followers_count":900,"follows_count":3,"media_count":61,"profile_picture_url":"https://cdn.fb/ig9.jpg"}`
 			}
-			if q.Get("fields") != "id,username,name" {
+			if q.Get("fields") != "id,username,name,profile_picture_url" {
 				t.Errorf("fields %q", q.Get("fields"))
 			}
-			return `{"id":"ig9","username":"ridemypark","name":"Ride My Park"}`
+			return `{"id":"ig9","username":"ridemypark","name":"Ride My Park","profile_picture_url":"https://cdn.fb/ig9-id.jpg"}`
 		},
 		"POST /v26.0/ig9/media":         static(`{"id":"c1"}`),
 		"GET /v26.0/c1":                 static(`{"status_code":"FINISHED"}`),
@@ -402,12 +419,15 @@ func TestInstagramFacebookLogin(t *testing.T) {
 	ig := newTestIG(t, f, map[string]string{"login": "facebook", "user_id": "ig9", "username": "", "access_token": "pagetok", "token_refreshed_at": ""},
 		func(map[string]string) error { saved++; return nil })
 	id, err := ig.Identify(context.Background())
-	if err != nil || id.RemoteUserID != "ig9" || id.Handle != "ridemypark" || id.Name != "Ride My Park" {
+	if err != nil || id.RemoteUserID != "ig9" || id.Handle != "ridemypark" || id.Name != "Ride My Park" || id.AvatarURL != "https://cdn.fb/ig9-id.jpg" {
 		t.Fatalf("identify %v %+v", err, id)
 	}
 	m, err := ig.AccountMetrics(context.Background())
 	if err != nil || m["followers"] != 900 || m["posts"] != 61 {
 		t.Fatalf("account %v %v", err, m)
+	}
+	if u, _ := ig.AvatarURL(context.Background()); u != "https://cdn.fb/ig9.jpg" {
+		t.Fatalf("avatar %q", u)
 	}
 	res, err := ig.Publish(context.Background(), providers.PublishRequest{Parts: []string{"hi"}, Media: []providers.MediaFile{jpeg("a.jpg")}})
 	if err != nil || res.RemoteID != "m1" {

@@ -192,6 +192,7 @@ type Client struct {
 	root             string
 	creds            map[string]string
 	persist          func(map[string]string) error
+	avatar           string // threads_profile_picture_url seen by the last Identify call
 	// PollInterval for container processing (tests override it).
 	PollInterval time.Duration
 }
@@ -256,16 +257,29 @@ func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 		ID       string `json:"id"`
 		Username string `json:"username"`
 		Name     string `json:"name"`
+		Picture  string `json:"threads_profile_picture_url"`
 	}
-	if err := c.getFields(ctx, "/me", url.Values{}, &r, "id,username,name", "id,username"); err != nil {
+	if err := c.getFields(ctx, "/me", url.Values{}, &r, "id,username,name,threads_profile_picture_url", "id,username,name", "id,username"); err != nil {
 		return nil, err
 	}
-	c.UserID, c.Username = r.ID, r.Username
+	c.UserID, c.Username, c.avatar = r.ID, r.Username, r.Picture
 	name := r.Name
 	if name == "" {
 		name = r.Username
 	}
-	return &providers.Identity{RemoteUserID: r.ID, Handle: r.Username, Name: name}, nil
+	return &providers.Identity{RemoteUserID: r.ID, Handle: r.Username, Name: name, AvatarURL: r.Picture}, nil
+}
+
+// AvatarURL is the profile picture (GET /me?fields=threads_profile_picture_url, threads_basic scope).
+// AccountMetrics reads insights, not /me, so the daily refresh costs one small /me call.
+func (c *Client) AvatarURL(ctx context.Context) (string, error) {
+	if c.avatar != "" {
+		return c.avatar, nil
+	}
+	if _, err := c.Identify(ctx); err != nil {
+		return "", err
+	}
+	return c.avatar, nil
 }
 
 func (c *Client) me(ctx context.Context) (string, error) {

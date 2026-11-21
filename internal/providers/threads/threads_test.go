@@ -330,7 +330,7 @@ func TestRefresh(t *testing.T) {
 	if id.RemoteUserID != "u1" || id.Handle != "rmp" || id.Name != "RideMyPark" {
 		t.Fatalf("identity %+v", id)
 	}
-	expect(t, f.form("GET /v1.0/me", 0), map[string]string{"fields": "id,username,name"})
+	expect(t, f.form("GET /v1.0/me", 0), map[string]string{"fields": "id,username,name,threads_profile_picture_url"})
 	if saved["access_token"] != "new" || saved["token_expires_at"] == "" {
 		t.Fatalf("persisted %v", saved)
 	}

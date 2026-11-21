@@ -139,7 +139,7 @@ func TestRefreshWhenExpired(t *testing.T) {
 	}
 	f.routes["GET /youtube/v3/channels"] = func(w http.ResponseWriter, r *http.Request) {
 		checkBearer(t, r, "fresh")
-		if r.URL.Query().Get("part") != "statistics" {
+		if r.URL.Query().Get("part") != "statistics,snippet" {
 			t.Errorf("part %q", r.URL.Query().Get("part"))
 		}
 		writeJSON(w, map[string]any{"items": []any{map[string]any{"id": "UC1", "statistics": map[string]any{

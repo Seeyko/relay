@@ -136,6 +136,7 @@ type Client struct {
 	creds   map[string]string
 	persist func(map[string]string) error
 	mu      sync.Mutex
+	avatar  string // avatar seen by the last Identify call
 	// PollInterval for publish status (tests override it).
 	PollInterval time.Duration
 }
@@ -299,19 +300,38 @@ func (c *Client) call(ctx context.Context, method, path string, body any, data a
 	return errors.New("tiktok: authentication failed")
 }
 
+// userAvatar holds the avatar fields of /v2/user/info/ (user.info.basic scope).
+type userAvatar struct {
+	Large  string `json:"avatar_large_url"`
+	URL100 string `json:"avatar_url_100"`
+	URL    string `json:"avatar_url"`
+}
+
+func (a userAvatar) best() string {
+	for _, u := range []string{a.Large, a.URL100, a.URL} {
+		if u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
+const avatarFields = "avatar_large_url,avatar_url_100"
+
 func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 	var r struct {
 		User struct {
 			OpenID      string `json:"open_id"`
 			DisplayName string `json:"display_name"`
 			Username    string `json:"username"`
+			userAvatar
 		} `json:"user"`
 	}
 	// username needs user.info.profile; fall back to the basic fields when it was not granted.
-	err := c.call(ctx, "GET", "/v2/user/info/?fields=open_id,display_name,username", nil, &r)
+	err := c.call(ctx, "GET", "/v2/user/info/?fields=open_id,display_name,username,"+avatarFields, nil, &r)
 	var he *providers.HTTPError
 	if errors.As(err, &he) && strings.Contains(he.Body, "scope_not_authorized") {
-		err = c.call(ctx, "GET", "/v2/user/info/?fields=open_id,display_name", nil, &r)
+		err = c.call(ctx, "GET", "/v2/user/info/?fields=open_id,display_name,"+avatarFields, nil, &r)
 	}
 	if err != nil {
 		return nil, err
@@ -319,7 +339,29 @@ func (c *Client) Identify(ctx context.Context) (*providers.Identity, error) {
 	if r.User.Username != "" {
 		c.creds["username"] = r.User.Username
 	}
-	return &providers.Identity{RemoteUserID: r.User.OpenID, Handle: r.User.Username, Name: r.User.DisplayName}, nil
+	c.avatar = r.User.best()
+	return &providers.Identity{RemoteUserID: r.User.OpenID, Handle: r.User.Username, Name: r.User.DisplayName, AvatarURL: c.avatar}, nil
+}
+
+// AvatarURL is the profile picture (avatar_large_url, else avatar_url_100; user.info.basic scope).
+// A token without the scope has no picture: "" and no error.
+func (c *Client) AvatarURL(ctx context.Context) (string, error) {
+	if c.avatar != "" {
+		return c.avatar, nil
+	}
+	var r struct {
+		User userAvatar `json:"user"`
+	}
+	err := c.call(ctx, "GET", "/v2/user/info/?fields="+avatarFields, nil, &r)
+	var he *providers.HTTPError
+	if errors.As(err, &he) && strings.Contains(he.Body, "scope_not_authorized") {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	c.avatar = r.User.best()
+	return c.avatar, nil
 }
 
 // AccountMetrics needs the user.info.stats scope.
