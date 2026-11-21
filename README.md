@@ -236,6 +236,12 @@ Tools:
 
 - Accounts: `list_providers`, `list_accounts`, `connect_account`, `import_history`, `set_account_avatar`
 - Posts: `validate_post`, `schedule_post`, `list_posts`, `get_post`, `update_post`, `approve_post`, `delete_post`, `publish_now`, `upload_media_from_url`
+- Deleting: `delete_post` removes the post from Relay only. `delete_post` with `remote: true` (REST:
+  `DELETE /v1/posts/{id}?remote=true`) first deletes the published post from the network, with every part of its
+  thread: X and Threads delete each reply, last first; Facebook and LinkedIn delete the post, which removes the
+  page's comments with it. If the network refuses, the post stays in Relay and the call can be repeated (ids that are
+  already gone count as deleted). Threads needs the `threads_delete` permission. Instagram, TikTok, YouTube and
+  websites answer 400: delete the post on the network, then call `delete_post` without `remote`.
 - Analytics: `analyze`, `post_timeline`, `account_growth`, `refresh_metrics`, `sql_query`
 - Conversations: `list_comments`, `reply_comment`
 - Browser agent: `create_browser_task`, `list_browser_tasks`
