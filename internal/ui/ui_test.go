@@ -54,6 +54,7 @@ type softKey struct {
 	count  uint32
 	rpID   string
 	origin string
+	noUV   bool // answer without user verification (presence only)
 }
 
 func newSoftKey(rpID, origin string) *softKey {
@@ -81,6 +82,9 @@ func (k *softKey) clientData(typ, challenge string) []byte {
 func (k *softKey) authData(attested bool) []byte {
 	h := sha256.Sum256([]byte(k.rpID))
 	flags := byte(0x01 | 0x04) // UP | UV
+	if k.noUV {
+		flags = 0x01
+	}
 	if attested {
 		flags |= 0x40
 	}
@@ -133,7 +137,10 @@ type harness struct {
 	ui     *UI
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWith(t, nil) }
+
+// newHarnessWith lets the test configure the dashboard before its routes are mounted.
+func newHarnessWith(t *testing.T, configure func(*UI)) *harness {
 	t.Helper()
 	srv := httptest.NewUnstartedServer(nil)
 	st, err := store.Open(filepath.Join(t.TempDir(), "relay.db"))
@@ -146,6 +153,9 @@ func newHarness(t *testing.T) *harness {
 	u, err := New(base, st, testToken, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if configure != nil {
+		configure(u)
 	}
 	mux := http.NewServeMux()
 	u.Register(mux)

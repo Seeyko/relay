@@ -7,7 +7,8 @@
 //     hash is stored. Sessions expire after SessionTTL.
 //   - State-changing calls are JSON POSTs checked against the expected Origin.
 //   - Strict CSP (no inline script), no framing, no caching of API responses.
-//   - The dashboard is read-only: it cannot publish, approve, edit or reply.
+//   - The dashboard is read-only: it cannot publish, approve, edit or reply. The one exception is revoking an
+//     app connected with OAuth.
 package ui
 
 import (
@@ -20,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -56,7 +58,9 @@ type UI struct {
 	APIToken string // required to register a passkey
 	// RegistrationClosed refuses new passkeys (RELAY_PASSKEY_REGISTRATION=off), even with the API token.
 	RegistrationClosed bool
-	Log                *slog.Logger
+	// Apps shows the apps connected with OAuth (list and revoke). Set when OAuth is on.
+	Apps bool
+	Log  *slog.Logger
 
 	origin string // e.g. https://relay.example.com
 	wa     *webauthn.WebAuthn
@@ -119,6 +123,10 @@ func (ui *UI) Register(mux *http.ServeMux) {
 	mux.Handle("GET /ui/api/drafts", ui.headers(ui.authed(ui.drafts)))
 	mux.Handle("GET /ui/api/posts/{id}", ui.headers(ui.authed(ui.preview)))
 	mux.Handle("GET /ui/api/passkeys", ui.headers(ui.authed(ui.passkeys)))
+	if ui.Apps {
+		mux.Handle("GET /ui/api/apps", ui.headers(ui.authed(ui.apps)))
+		mux.Handle("POST /ui/api/apps/{id}/revoke", ui.headers(ui.post(ui.authed(ui.revokeApp).ServeHTTP)))
+	}
 }
 
 // ---------- middleware ----------
@@ -250,7 +258,7 @@ func (ui *UI) me(w http.ResponseWriter, r *http.Request) {
 	if pks, err := ui.Store.ListPasskeys(r.Context()); err == nil {
 		n = len(pks)
 	}
-	writeJSON(w, 200, map[string]any{"logged_in": ui.loggedIn(r), "has_passkeys": n > 0, "registration_open": !ui.RegistrationClosed})
+	writeJSON(w, 200, map[string]any{"logged_in": ui.loggedIn(r), "has_passkeys": n > 0, "registration_open": !ui.RegistrationClosed, "apps": ui.Apps})
 }
 
 func (ui *UI) logout(w http.ResponseWriter, r *http.Request) {
@@ -431,10 +439,46 @@ func (ui *UI) loginFinish(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "login expired, start again")
 		return
 	}
-	o, byID, err := ui.loadOwner(r.Context())
-	if err != nil || len(o.creds) == 0 {
-		jsonErr(w, http.StatusUnauthorized, "no passkey registered")
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonErr(w, http.StatusBadRequest, "unreadable body")
 		return
+	}
+	pk, err := ui.verifyAssertion(r.Context(), cer.session, body)
+	if errors.Is(err, errStorage) {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	if err != nil {
+		ui.Log.Warn("dashboard: login failed", "ip", clientIP(r), "err", err)
+		jsonErr(w, http.StatusUnauthorized, "login failed")
+		return
+	}
+	tok := randomToken()
+	if err := ui.Store.CreateUISession(r.Context(), hashToken(tok), pk.ID, ui.now().Add(SessionTTL)); err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	ui.setCookie(w, cookieSession, tok, int(SessionTTL.Seconds()))
+	ui.Log.Info("dashboard: login", "passkey", pk.Name, "ip", clientIP(r))
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+var errStorage = errors.New("storage error")
+
+// verifyAssertion checks a discoverable, user-verified assertion of one of the owner's passkeys against the
+// ceremony session, and stores the new sign count.
+func (ui *UI) verifyAssertion(ctx context.Context, sess webauthn.SessionData, body []byte) (*store.Passkey, error) {
+	o, byID, err := ui.loadOwner(ctx)
+	if err != nil {
+		return nil, errStorage
+	}
+	if len(o.creds) == 0 {
+		return nil, errors.New("no passkey registered")
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
+	if err != nil {
+		return nil, err
 	}
 	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
 		if subtle.ConstantTimeCompare(userHandle, ownerID) != 1 {
@@ -442,35 +486,100 @@ func (ui *UI) loginFinish(w http.ResponseWriter, r *http.Request) {
 		}
 		return o, nil
 	}
-	cred, err := ui.wa.FinishDiscoverableLogin(handler, cer.session, r)
+	cred, err := ui.wa.ValidateDiscoverableLogin(handler, sess, parsed)
 	if err != nil {
-		ui.Log.Warn("dashboard: login failed", "ip", clientIP(r), "err", err)
-		jsonErr(w, http.StatusUnauthorized, "login failed")
-		return
+		return nil, err
 	}
 	if cred.Authenticator.CloneWarning {
-		ui.Log.Warn("dashboard: login refused, passkey sign counter went backwards (possible clone)", "ip", clientIP(r))
-		jsonErr(w, http.StatusUnauthorized, "login failed")
-		return
+		return nil, errors.New("passkey sign counter went backwards (possible clone)")
+	}
+	if !cred.Flags.UserVerified {
+		return nil, errors.New("user verification missing")
 	}
 	id := base64.RawURLEncoding.EncodeToString(cred.ID)
-	if _, ok := byID[id]; !ok {
-		jsonErr(w, http.StatusUnauthorized, "login failed")
-		return
+	pk, ok := byID[id]
+	if !ok {
+		return nil, errors.New("unknown passkey")
 	}
 	raw, _ := json.Marshal(cred)
-	if err := ui.Store.TouchPasskey(r.Context(), id, string(raw)); err != nil {
+	if err := ui.Store.TouchPasskey(ctx, id, string(raw)); err != nil {
+		return nil, errStorage
+	}
+	return pk, nil
+}
+
+// ---------- OAuth consent (implements oauth.Passkeys) ----------
+
+// SessionID returns the hash of the valid dashboard session cookie of r.
+func (ui *UI) SessionID(r *http.Request) (string, bool) {
+	c, err := r.Cookie(ui.cookieName(cookieSession))
+	if err != nil || len(c.Value) < 40 {
+		return "", false
+	}
+	h := hashToken(c.Value)
+	ok, err := ui.Store.UISessionValid(r.Context(), h)
+	return h, err == nil && ok
+}
+
+func (ui *UI) HasPasskeys(ctx context.Context) bool {
+	pks, err := ui.Store.ListPasskeys(ctx)
+	return err == nil && len(pks) > 0
+}
+
+// BeginAssertion starts a fresh passkey check (user verification required). The state lives with the caller.
+func (ui *UI) BeginAssertion() (any, any, error) {
+	assertion, sess, err := ui.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+	if err != nil {
+		return nil, nil, err
+	}
+	return assertion, &assertionState{session: *sess, expires: ui.now().Add(ceremonyTTL)}, nil
+}
+
+type assertionState struct {
+	session webauthn.SessionData
+	expires time.Time
+}
+
+// FinishAssertion verifies the answer to BeginAssertion.
+func (ui *UI) FinishAssertion(ctx context.Context, state any, credential []byte) error {
+	st, ok := state.(*assertionState)
+	if !ok || st == nil {
+		return errors.New("no passkey check in progress")
+	}
+	if ui.now().After(st.expires) {
+		return errors.New("passkey check expired")
+	}
+	pk, err := ui.verifyAssertion(ctx, st.session, credential)
+	if err != nil {
+		return err
+	}
+	ui.Log.Info("dashboard: passkey check for an app approval", "passkey", pk.Name)
+	return nil
+}
+
+// ---------- connected apps (OAuth grants) ----------
+
+func (ui *UI) apps(w http.ResponseWriter, r *http.Request) {
+	gs, err := ui.Store.ListOAuthGrants(r.Context())
+	if err != nil {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	tok := randomToken()
-	if err := ui.Store.CreateUISession(r.Context(), hashToken(tok), id, ui.now().Add(SessionTTL)); err != nil {
+	writeJSON(w, 200, map[string]any{"apps": gs})
+}
+
+func (ui *UI) revokeApp(w http.ResponseWriter, r *http.Request) {
+	err := ui.Store.DeleteOAuthGrant(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		jsonErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	ui.setCookie(w, cookieSession, tok, int(SessionTTL.Seconds()))
-	ui.Log.Info("dashboard: login", "passkey", byID[id].Name, "ip", clientIP(r))
-	writeJSON(w, 200, map[string]any{"ok": true})
+	ui.Log.Info("dashboard: app revoked", "grant", r.PathValue("id"), "ip", clientIP(r))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---------- read-only data ----------

@@ -684,5 +684,30 @@ func BuildTools(svc *core.Service) []Tool {
 				return svc.Store.ListTasks(ctx, a.Status)
 			},
 		},
+		{
+			Name:        "list_oauth_grants",
+			Admin:       true,
+			Description: "List the apps connected with OAuth (claude.ai, ChatGPT, Claude Code...): id, app name, scope (relay:admin = full access, relay:drafts = drafts only), created_at, last_used_at, expires_at. Tokens are never shown.",
+			InputSchema: obj(map[string]any{}),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				return svc.Store.ListOAuthGrants(ctx)
+			},
+		},
+		{
+			Name:        "revoke_oauth_grant",
+			Admin:       true,
+			Description: "Disconnect an app connected with OAuth: every token issued to it stops working at once. The app must be approved again (with the owner's passkey) to reconnect.",
+			InputSchema: obj(map[string]any{"id": str("grant id from list_oauth_grants")}, "id"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct{ ID string }](raw)
+				if err != nil {
+					return nil, err
+				}
+				if err := svc.Store.DeleteOAuthGrant(ctx, a.ID); err != nil {
+					return nil, err
+				}
+				return map[string]any{"revoked": a.ID}, nil
+			},
+		},
 	}
 }

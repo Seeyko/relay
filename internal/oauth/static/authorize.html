@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111110" media="(prefers-color-scheme: dark)">
+<title>Relay</title>
+<link rel="stylesheet" href="/ui/style.css">
+<link rel="stylesheet" href="/oauth/static/oauth.css">
+{{if not .Error}}<script src="/oauth/static/oauth.js" defer></script>{{end}}
+</head>
+<body>
+<main id="consent" class="login consent" data-req="{{.Req}}">
+  <div class="mark" aria-hidden="true"></div>
+{{- if .Error}}
+  <p class="msg err">{{.Error}}</p>
+{{- else}}
+{{- if .Name}}
+  <h1 class="app">{{.Name}}</h1>
+  <p class="host">{{.Host}}</p>
+{{- else}}
+  <h1 class="app">{{.Host}}</h1>
+{{- end}}
+  <button id="signin" class="primary" type="button" hidden></button>
+  <p id="nokey" class="msg" hidden></p>
+  <div id="ask" class="ask" hidden>
+    <div id="scopes" class="scopes" role="radiogroup"></div>
+    <button id="approve" class="primary" type="button"></button>
+  </div>
+  <button id="deny" class="link" type="button" hidden></button>
+  <p id="msg" class="msg" role="status"></p>
+{{- end}}
+</main>
+</body>
+</html>

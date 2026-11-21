@@ -17,6 +17,7 @@ import (
 	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
+	"github.com/Seeyko/relay/internal/oauth"
 	"github.com/Seeyko/relay/internal/secret"
 	"github.com/Seeyko/relay/internal/store"
 	"github.com/Seeyko/relay/internal/ui"
@@ -143,6 +144,15 @@ func run(log *slog.Logger) error {
 			dash.RegistrationClosed = os.Getenv("RELAY_PASSKEY_REGISTRATION") == "off"
 			dash.Svc = svc
 			a.UI = dash
+			if os.Getenv("RELAY_OAUTH") != "off" {
+				authz, err := oauth.New(svc.BaseURL, st, dash, log)
+				if err != nil {
+					log.Warn("oauth disabled", "err", err)
+				} else {
+					a.OAuth = authz
+					dash.Apps = true
+				}
+			}
 		}
 	}
 	srv := &http.Server{Addr: env("RELAY_ADDR", ":8080"), Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}

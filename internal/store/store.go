@@ -163,6 +163,9 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(feedbackSchema); err != nil {
 		return err
 	}
+	if _, err := s.db.Exec(oauthSchema); err != nil {
+		return err
+	}
 	for _, c := range addedColumns {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c[0], c[1]).Scan(&n); err != nil {
@@ -920,7 +923,7 @@ func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult,
 	if strings.Contains(lq, "credentials") {
 		return nil, errors.New("account credentials are not queryable")
 	}
-	if strings.Contains(lq, "passkeys") || strings.Contains(lq, "ui_sessions") || strings.Contains(lq, "sqlite_") {
+	if strings.Contains(lq, "passkeys") || strings.Contains(lq, "ui_sessions") || strings.Contains(lq, "oauth_") || strings.Contains(lq, "sqlite_") {
 		return nil, errors.New("dashboard login data is not queryable")
 	}
 	if maxRows <= 0 || maxRows > 1000 {

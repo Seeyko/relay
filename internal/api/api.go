@@ -16,6 +16,7 @@ import (
 	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
+	"github.com/Seeyko/relay/internal/oauth"
 	"github.com/Seeyko/relay/internal/store"
 	"github.com/Seeyko/relay/internal/ui"
 )
@@ -30,6 +31,8 @@ type API struct {
 	Version    string
 	// UI (optional) is the read-only passkey dashboard mounted under /ui/.
 	UI *ui.UI
+	// OAuth (optional) lets agents connect to /mcp with OAuth 2.1, approved with the dashboard passkey.
+	OAuth *oauth.Server
 }
 
 func (a *API) Handler() http.Handler {
@@ -55,6 +58,12 @@ func (a *API) Handler() http.Handler {
 	if a.UI != nil {
 		a.UI.Register(mux)
 		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/ui/", http.StatusFound) })
+	}
+	// Metadata and OAuth endpoints answer 404 (not 401) when OAuth is off, so clients fall back to static tokens.
+	mux.HandleFunc("/.well-known/", http.NotFound)
+	mux.HandleFunc("/oauth/", http.NotFound)
+	if a.OAuth != nil {
+		a.OAuth.Register(mux)
 	}
 
 	authed := http.NewServeMux()
@@ -97,6 +106,8 @@ func (a *API) Handler() http.Handler {
 	authed.HandleFunc("POST /v1/posts/{id}/approve", a.tool("approve_post", map[string]string{"id": "id"}))
 	authed.HandleFunc("POST /v1/posts/validate", a.tool("validate_post", nil))
 	authed.HandleFunc("GET /v1/accounts/growth", a.tool("account_growth", nil))
+	authed.HandleFunc("GET /v1/oauth/grants", a.tool("list_oauth_grants", nil))
+	authed.HandleFunc("DELETE /v1/oauth/grants/{id}", a.tool("revoke_oauth_grant", map[string]string{"id": "id"}))
 	authed.HandleFunc("POST /v1/query", a.tool("sql_query", nil))
 
 	authed.HandleFunc("GET /v1/media", func(w http.ResponseWriter, r *http.Request) {
@@ -160,9 +171,19 @@ func (a *API) auth(next http.Handler) http.Handler {
 		case a.DraftToken != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.DraftToken)) == 1:
 			role = mcp.RoleDrafter
 		default:
-			w.Header().Set("WWW-Authenticate", `Bearer realm="relay"`)
-			writeJSON(w, 401, map[string]string{"error": "unauthorized"})
-			return
+			scope, ok := "", false
+			if a.OAuth != nil && tok != "" {
+				scope, ok = a.OAuth.Authenticate(r.Context(), tok)
+			}
+			switch {
+			case ok && scope == oauth.ScopeAdmin:
+				role = mcp.RoleAdmin
+			case ok && scope == oauth.ScopeDrafts:
+				role = mcp.RoleDrafter
+			default:
+				a.unauthorized(w, tok != "")
+				return
+			}
 		}
 		if role != mcp.RoleAdmin && !drafterRoute(r) {
 			writeJSON(w, 403, map[string]string{"error": mcp.ErrForbidden.Error()})
@@ -170,6 +191,20 @@ func (a *API) auth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(mcp.WithRole(r.Context(), role)))
 	})
+}
+
+// unauthorized points OAuth clients to the protected resource metadata (RFC 9728 §5.1).
+func (a *API) unauthorized(w http.ResponseWriter, gaveToken bool) {
+	if a.OAuth == nil {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="relay"`)
+	} else {
+		v := `Bearer resource_metadata="` + a.OAuth.ResourceMetadataURL() + `"`
+		if gaveToken {
+			v += `, error="invalid_token"`
+		}
+		w.Header().Set("WWW-Authenticate", v)
+	}
+	writeJSON(w, 401, map[string]string{"error": "unauthorized"})
 }
 
 // drafterRoute lists the non-tool routes a drafter key may use; tool routes are checked per tool.

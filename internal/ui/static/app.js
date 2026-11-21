@@ -14,7 +14,9 @@ const T = FR
       attempts: "tentatives", nextTry: "prochain essai", media: "Médias", options: "Options", details: "Détails", more: "plus",
       comment: "Commentaire", title: "Titre", description: "Description", caption: "Légende", local: "heure locale",
       created: "Créé", updated: "Modifié", post: "Post", group: "Groupe", missing: "média introuvable", close: "Fermer",
-      readOnly: "Lecture seule · approbation par approve_post", yes: "oui", no: "non", load: "Chargement impossible" }
+      readOnly: "Lecture seule · approbation par approve_post", yes: "oui", no: "non", load: "Chargement impossible",
+      apps: "Apps", noApps: "Aucune app connectée", full: "Accès complet", draftsOnly: "Brouillons", lastUsed: "utilisée",
+      revoke: "Révoquer" }
   : { signIn: "Sign in", addKey: "Add a key", token: "API token", create: "Create", week: "Week", day: "Day",
       empty: "Nothing planned", cancelled: "Cancelled.", failed: "Failed", unsupported: "This browser doesn't support passkeys.",
       added: "Key added.", dup: "This key already exists.", open: "Open",
@@ -24,7 +26,9 @@ const T = FR
       attempts: "attempts", nextTry: "next try", media: "Media", options: "Options", details: "Details", more: "more",
       comment: "Comment", title: "Title", description: "Description", caption: "Caption", local: "your time",
       created: "Created", updated: "Updated", post: "Post", group: "Group", missing: "media not found", close: "Close",
-      readOnly: "Read-only · approve with approve_post", yes: "yes", no: "no", load: "Could not load" };
+      readOnly: "Read-only · approve with approve_post", yes: "yes", no: "no", load: "Could not load",
+      apps: "Apps", noApps: "No connected apps", full: "Full access", draftsOnly: "Drafts only", lastUsed: "used",
+      revoke: "Revoke" };
 const NET_NAMES = { x: "X", instagram: "Instagram", facebook: "Facebook", threads: "Threads", "linkedin-page": "LinkedIn",
   youtube: "YouTube", tiktok: "TikTok", website: "Website" };
 
@@ -47,6 +51,7 @@ const HEART_ICON = "M12 20s-7-4.4-9.2-8.6C1.4 8.6 3.2 5 6.6 5c2 0 3.4 1.1 4.2 2.
 const COMMENT_ICON = "M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12z";
 const SHARE_ICON = "M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3";
 const SAVE_ICON = "M6 3h12v18l-6-4-6 4z";
+const APPS_ICON = "M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0zM12 16v5";
 const WARN_ICON = "M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z";
 
 const mobile = matchMedia("(max-width: 760px)");
@@ -611,6 +616,53 @@ async function openPreview(p) {
   if (posts.length) show(0);
 }
 
+// ---------- connected apps (OAuth) ----------
+
+async function openApps() {
+  const dlg = $("preview");
+  const body = $("preview-body");
+  const top = el("div", "pv-top");
+  const close = el("button", "icon"); close.type = "button"; close.setAttribute("aria-label", T.close); close.append(svg(CLOSE_ICON));
+  close.addEventListener("click", () => dlg.close());
+  const actions = el("div", "pv-actions");
+  actions.append(close);
+  top.append(el("div", "apps-title", T.apps), actions);
+  const holder = el("div", "pv-body");
+  holder.append(el("div", "pv-loading"));
+  body.replaceChildren(top, holder);
+  if (!dlg.open) { lockPage(); dlg.showModal(); body.tabIndex = -1; body.focus({ preventScroll: true }); }
+
+  let data;
+  try { data = await api("apps"); }
+  catch (e) {
+    if (e.status === 401) { dlg.close(); return showLogin(); }
+    holder.replaceChildren(el("p", "pv-err", `${T.load}: ${e.message}`));
+    return;
+  }
+  const apps = data.apps || [];
+  if (!apps.length) return holder.replaceChildren(el("p", "empty", T.noApps));
+  const list = el("div", "apps");
+  const day = (t) => new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  for (const g of apps) {
+    const row = el("div", "app-row");
+    const info = el("div", "app-info");
+    info.append(el("b", "", g.client_name || g.client_id));
+    const meta = [g.scope === "relay:drafts" ? T.draftsOnly : T.full, day(g.created_at)];
+    if (g.last_used_at) meta.push(`${T.lastUsed} ${day(g.last_used_at)}`);
+    info.append(el("span", "app-meta", meta.join(" · ")));
+    const btn = el("button", "app-revoke", T.revoke); btn.type = "button";
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try { await api(`apps/${encodeURIComponent(g.id)}/revoke`, { method: "POST", body: {} }); row.remove(); }
+      catch (e) { btn.disabled = false; if (e.status === 401) { dlg.close(); showLogin(); } }
+      if (!list.children.length) holder.replaceChildren(el("p", "empty", T.noApps));
+    });
+    row.append(info, btn);
+    list.append(row);
+  }
+  holder.replaceChildren(list);
+}
+
 // ---------- navigation ----------
 
 function step(n) {
@@ -636,6 +688,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("reg-toggle").addEventListener("click", () => { $("register").hidden = !$("register").hidden; $("reg-token").focus(); });
   $("register").addEventListener("submit", register);
   $("logout").addEventListener("click", logout);
+  $("apps-btn").append(svg(APPS_ICON));
+  $("apps-btn").addEventListener("click", openApps);
   $("prev").addEventListener("click", () => step(-1));
   $("next").addEventListener("click", () => step(1));
   $("range").addEventListener("click", () => { if (state.view !== "drafts") goToday(); });
@@ -673,6 +727,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   try {
     const me = await api("me");
+    $("apps-btn").hidden = !me.apps;
     if (me.logged_in) return showApp();
     if (me.registration_open !== false) {
       $("reg-toggle").hidden = false;
