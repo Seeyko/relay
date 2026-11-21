@@ -36,19 +36,20 @@ type stubKeys struct {
 	n        int
 }
 
-func (k *stubKeys) SessionID(r *http.Request) (string, bool) {
+func (k *stubKeys) Session(r *http.Request) (string, *oauth.Member, bool) {
 	c, err := r.Cookie("test_session")
 	if err != nil {
-		return "", false
+		return "", nil, false
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return "sid-" + c.Value, k.sessions[c.Value]
+	// Members without an id stand for the single owner of before team members: their grants are not capped.
+	return "sid-" + c.Value, &oauth.Member{Role: "owner", HasPasskey: k.has}, k.sessions[c.Value]
 }
 
-func (k *stubKeys) HasPasskeys(context.Context) bool { return k.has }
+func (k *stubKeys) LoginMethods(context.Context) (bool, bool) { return k.has, false }
 
-func (k *stubKeys) BeginAssertion() (any, any, error) {
+func (k *stubKeys) BeginAssertion(context.Context, string) (any, any, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	k.n++
@@ -56,7 +57,7 @@ func (k *stubKeys) BeginAssertion() (any, any, error) {
 	return map[string]any{"publicKey": map[string]any{"challenge": ch, "userVerification": "required"}}, ch, nil
 }
 
-func (k *stubKeys) FinishAssertion(_ context.Context, state any, cred []byte) error {
+func (k *stubKeys) FinishAssertion(_ context.Context, _ string, state any, cred []byte) error {
 	var c struct {
 		Challenge string `json:"challenge"`
 		OK        bool   `json:"ok"`
@@ -69,6 +70,12 @@ func (k *stubKeys) FinishAssertion(_ context.Context, state any, cred []byte) er
 	}
 	return nil
 }
+
+func (k *stubKeys) EmailCodes() bool { return false }
+func (k *stubKeys) SendCode(context.Context, string, string, string, string) error {
+	return errors.New("off")
+}
+func (k *stubKeys) CheckCode(context.Context, string, string) error { return errors.New("off") }
 
 type oenv struct {
 	t     *testing.T

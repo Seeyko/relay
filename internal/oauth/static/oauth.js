@@ -1,5 +1,6 @@
 "use strict";
-// Relay consent page: sign in with the dashboard passkey, choose the access, approve with a fresh passkey check.
+// Relay consent page: sign in (passkey or email link), choose the access, approve with a fresh check: the
+// member's passkey, or a code sent by email when the member has no passkey.
 // The request parameters stay on the server: this page only knows the request id.
 
 const $ = (id) => document.getElementById(id);
@@ -7,14 +8,18 @@ const FR = (navigator.language || "").toLowerCase().startsWith("fr");
 const T = FR
   ? { signIn: "Se connecter", full: "Accès complet", drafts: "Brouillons", approve: "Autoriser", deny: "Refuser",
       nokey: "Ajoutez d'abord une passkey dans le tableau de bord.", cancelled: "Annulé.", failed: "Échec",
-      expired: "Demande expirée. Relancez la connexion depuis l'app.", unsupported: "Ce navigateur ne gère pas les passkeys." }
+      expired: "Demande expirée. Relancez la connexion depuis l'app.", unsupported: "Ce navigateur ne gère pas les passkeys.",
+      email: "Email", sendLink: "Recevoir un lien", sent: "Lien envoyé. Ouvrez-le, puis revenez ici.", code: "Code reçu par email",
+      confirm: "Confirmer", noRole: "Votre rôle ne permet pas d'autoriser une app." }
   : { signIn: "Sign in", full: "Full access", drafts: "Drafts only", approve: "Approve", deny: "Deny",
       nokey: "Add a passkey in the dashboard first.", cancelled: "Cancelled.", failed: "Failed",
-      expired: "This request expired. Start again from the app.", unsupported: "This browser doesn't support passkeys." };
+      expired: "This request expired. Start again from the app.", unsupported: "This browser doesn't support passkeys.",
+      email: "Email", sendLink: "Email me a link", sent: "Link sent. Open it, then come back here.", code: "Code sent by email",
+      confirm: "Confirm", noRole: "Your role cannot approve apps." };
 const LABELS = { "relay:admin": T.full, "relay:drafts": T.drafts };
 
 const req = $("consent").dataset.req;
-let csrf = "", scope = "", assertion = null;
+let csrf = "", scope = "", assertion = null, method = "", polling = null;
 
 function b64uToBuf(s) {
   s = s.replace(/-/g, "+").replace(/_/g, "/");
@@ -47,7 +52,7 @@ function fail(e) {
   say(e.name === "NotAllowedError" ? T.cancelled : `${T.failed}: ${e.message}`, e.name !== "NotAllowedError");
 }
 
-function done() { $("ask").hidden = true; $("signin").hidden = true; $("deny").hidden = true; }
+function done() { $("ask").hidden = true; $("signin").hidden = true; $("deny").hidden = true; $("email-form").hidden = true; }
 
 function publicKey(opts) {
   const pk = opts.publicKey;
@@ -88,6 +93,7 @@ async function signIn() {
 }
 
 async function approve() {
+  if (method === "email") return askCode();
   if (!window.PublicKeyCredential) return say(T.unsupported, true);
   if (!assertion) await prepare();
   if (!assertion) return;
@@ -104,6 +110,52 @@ async function approve() {
     btn.disabled = false;
     prepare();
   }
+}
+
+// Email check: the code is sent when Approve is pressed, then typed in.
+async function askCode() {
+  const btn = $("approve");
+  btn.disabled = true;
+  say("");
+  try {
+    await call("/oauth/api/approve/begin", { req, csrf });
+    btn.hidden = true;
+    $("code-form").hidden = false;
+    $("code-input").focus();
+  } catch (e) { fail(e); btn.disabled = false; }
+}
+
+async function sendCode(ev) {
+  ev.preventDefault();
+  const input = $("code-input");
+  const btn = $("code-btn");
+  btn.disabled = true;
+  say("");
+  try {
+    const res = await call("/oauth/api/approve/finish", { req, csrf, scope, code: input.value.trim() });
+    done();
+    location.assign(res.redirect);
+  } catch (e) { input.value = ""; fail(e); btn.disabled = false; }
+}
+
+async function emailLink(ev) {
+  ev.preventDefault();
+  const input = $("email-input");
+  const email = input.value.trim();
+  if (!email) return;
+  try {
+    const res = await fetch("/ui/api/email/login", {
+      method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin", body: JSON.stringify({ email }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
+    say(T.sent);
+    // The link opens in another tab and signs in this browser: wait for it.
+    clearInterval(polling);
+    polling = setInterval(async () => {
+      try { const st = await call("/oauth/api/state", { req }); if (st.logged_in) { clearInterval(polling); say(""); load(); } }
+      catch { clearInterval(polling); }
+    }, 3000);
+  } catch (e) { fail(e); }
 }
 
 async function deny() {
@@ -134,19 +186,28 @@ async function load() {
   $("deny").hidden = false;
   if (st.logged_in) {
     csrf = st.csrf;
-    renderScopes(st.scopes);
+    method = st.method || "";
     $("signin").hidden = true;
+    $("email-form").hidden = true;
+    if (!st.can_approve) return say(T.noRole, true);
+    if (!method) return nokey();
+    renderScopes(st.scopes);
     $("ask").hidden = false;
-    prepare();
-  } else if (st.has_passkeys) {
-    $("signin").hidden = false;
+    if (method === "passkey") prepare();
+  } else if (st.has_passkeys || st.email) {
+    $("signin").hidden = !st.has_passkeys;
+    $("email-form").hidden = !st.email;
   } else {
-    $("nokey").hidden = false;
-    const a = document.createElement("a");
-    a.href = "/ui/";
-    a.textContent = T.nokey;
-    $("nokey").replaceChildren(a);
+    nokey();
   }
+}
+
+function nokey() {
+  $("nokey").hidden = false;
+  const a = document.createElement("a");
+  a.href = "/ui/";
+  a.textContent = T.nokey;
+  $("nokey").replaceChildren(a);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -156,5 +217,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("signin").addEventListener("click", signIn);
   $("approve").addEventListener("click", approve);
   $("deny").addEventListener("click", deny);
+  $("email-input").placeholder = T.email;
+  $("email-btn").textContent = T.sendLink;
+  $("code-input").placeholder = T.code;
+  $("code-btn").textContent = T.confirm;
+  $("email-form").addEventListener("submit", emailLink);
+  $("code-form").addEventListener("submit", sendCode);
   load();
 });

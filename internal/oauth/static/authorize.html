@@ -24,10 +24,18 @@
   <h1 class="app">{{.Host}}</h1>
 {{- end}}
   <button id="signin" class="primary" type="button" hidden></button>
+  <form id="email-form" class="register" hidden>
+    <input id="email-input" type="email" autocomplete="email" spellcheck="false" required>
+    <button id="email-btn" type="submit"></button>
+  </form>
   <p id="nokey" class="msg" hidden></p>
   <div id="ask" class="ask" hidden>
     <div id="scopes" class="scopes" role="radiogroup"></div>
     <button id="approve" class="primary" type="button"></button>
+    <form id="code-form" class="register" hidden>
+      <input id="code-input" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+      <button id="code-btn" type="submit"></button>
+    </form>
   </div>
   <button id="deny" class="link" type="button" hidden></button>
   <p id="msg" class="msg" role="status"></p>

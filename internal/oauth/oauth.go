@@ -4,9 +4,11 @@
 // (RFC 8707), refresh token rotation and revocation (RFC 7009).
 //
 // Security model:
-//   - Relay has one human: the owner who signs in to the dashboard with a passkey. An app gets tokens only
-//     after the owner approves it on the consent page, and every approval needs a fresh passkey assertion with
-//     user verification (not only the 12 h dashboard session).
+//   - An app gets tokens only after a dashboard member approves it on the consent page. Every approval needs a
+//     fresh check (not only the 12 h dashboard session): an assertion of the member's own passkey with user
+//     verification, or, for a member without a passkey, a 6-digit code sent by email (10 min, 5 attempts).
+//   - The member's role caps the access: owners and admins may give full access, editors drafts only, viewers
+//     cannot approve. The cap is enforced again on every request, so a demotion takes effect at once.
 //   - Clients are public (no secret): PKCE S256 is required, redirect URIs are matched exactly (loopback
 //     redirects ignore the port, RFC 8252) and only https or loopback http URIs can be registered.
 //   - Codes live 60 s and are single use: a code presented twice deletes the grant made from it.
@@ -56,15 +58,27 @@ const (
 
 var supportedScopes = []string{ScopeAdmin, ScopeDrafts}
 
+// Member is the signed-in dashboard member, as the consent page sees it.
+type Member struct {
+	ID, Email, Name, Role string
+	HasPasskey            bool
+}
+
 // Passkeys is the dashboard's login, used by the consent page.
 type Passkeys interface {
-	// SessionID returns a stable opaque id of the valid dashboard session of r.
-	SessionID(r *http.Request) (string, bool)
-	HasPasskeys(ctx context.Context) bool
-	// BeginAssertion starts a WebAuthn assertion with user verification required: options go to
+	// Session returns a stable opaque id of the valid dashboard session of r, and its member.
+	Session(r *http.Request) (string, *Member, bool)
+	// LoginMethods tells the signed-out page how it can sign in: a passkey exists, sign-in links work.
+	LoginMethods(ctx context.Context) (passkey, email bool)
+	// BeginAssertion starts a WebAuthn assertion of the member with user verification required: options go to
 	// navigator.credentials.get, state comes back to FinishAssertion (once).
-	BeginAssertion() (options any, state any, err error)
-	FinishAssertion(ctx context.Context, state any, credential []byte) error
+	BeginAssertion(ctx context.Context, userID string) (options any, state any, err error)
+	// FinishAssertion accepts only a passkey of that member.
+	FinishAssertion(ctx context.Context, userID string, state any, credential []byte) error
+	// EmailCodes reports whether a member without a passkey can confirm with a code sent by email.
+	EmailCodes() bool
+	SendCode(ctx context.Context, userID, app, lang, ip string) error
+	CheckCode(ctx context.Context, userID, code string) error
 }
 
 type Server struct {
@@ -132,19 +146,49 @@ func (s *Server) Register(mux *http.ServeMux) {
 	s.registerConsent(mux)
 }
 
-// Authenticate checks an OAuth access token and returns its scope.
-func (s *Server) Authenticate(ctx context.Context, token string) (string, bool) {
+// Access is what a valid access token grants right now.
+type Access struct {
+	Scope  string
+	UserID string // the member who approved the app ("" for a grant made before team members)
+}
+
+// Authenticate checks an OAuth access token. The scope is capped by the current role of the member who approved
+// the app: an editor's apps are drafts only, a viewer's, a disabled or a removed member's apps get nothing.
+func (s *Server) Authenticate(ctx context.Context, token string) (Access, bool) {
 	if !strings.HasPrefix(token, prefixAccess) {
-		return "", false
+		return Access{}, false
 	}
 	a, err := s.Store.OAuthAccessToken(ctx, hashToken(token), s.Now())
 	if err != nil {
-		return "", false
+		return Access{}, false
 	}
 	if subtle.ConstantTimeCompare([]byte(a.Resource), []byte(s.resource)) != 1 { // audience (RFC 8707)
-		return "", false
+		return Access{}, false
 	}
-	return a.Scope, true
+	scope := a.Scope
+	if a.UserID != "" {
+		if !a.UserActive {
+			return Access{}, false
+		}
+		capped := ScopesFor(a.UserRole, []string{scope})
+		if len(capped) == 0 {
+			return Access{}, false
+		}
+		scope = capped[0]
+	}
+	return Access{Scope: scope, UserID: a.UserID}, true
+}
+
+// ScopesFor is what a member with role may approve out of requested (most privileged first): owners and
+// admins everything, editors drafts only, viewers nothing.
+func ScopesFor(role string, requested []string) []string {
+	switch role {
+	case store.RoleOwner, store.RoleAdmin:
+		return requested
+	case store.RoleEditor:
+		return []string{ScopeDrafts}
+	}
+	return nil
 }
 
 // ---------- metadata ----------

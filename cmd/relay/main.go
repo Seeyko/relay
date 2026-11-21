@@ -16,10 +16,12 @@ import (
 	"github.com/Seeyko/relay/internal/api"
 	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/core"
+	"github.com/Seeyko/relay/internal/email"
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/oauth"
 	"github.com/Seeyko/relay/internal/secret"
 	"github.com/Seeyko/relay/internal/store"
+	"github.com/Seeyko/relay/internal/team"
 	"github.com/Seeyko/relay/internal/ui"
 
 	// connectors register themselves
@@ -88,6 +90,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	defer st.Close()
+	if err := st.EnsureOwnerEmail(context.Background(), os.Getenv("RELAY_OWNER_EMAIL")); err != nil {
+		log.Warn("RELAY_OWNER_EMAIL not applied", "err", err)
+	}
 
 	svc := &core.Service{
 		Store:         st,
@@ -129,20 +134,42 @@ func run(log *slog.Logger) error {
 
 	bootstrapX(ctx, svc, log)
 
-	server := mcp.NewServer("relay", version, mcp.BuildTools(svc))
+	// Team members of the dashboard, with email sign-in when Resend is configured.
+	uiOn := os.Getenv("RELAY_UI") != "off" && svc.BaseURL != ""
+	var tm *team.Team
+	if uiOn {
+		var mail email.Sender
+		if key, from := os.Getenv("RELAY_RESEND_API_KEY"), os.Getenv("RELAY_EMAIL_FROM"); key != "" || from != "" {
+			rs, err := email.NewResend(key, from)
+			if err != nil {
+				return err
+			}
+			rs.Endpoint = os.Getenv("RELAY_RESEND_ENDPOINT") // tests and staging only
+			mail = rs
+		} else {
+			log.Info("email off: no invitations or email sign-in (set RELAY_RESEND_API_KEY and RELAY_EMAIL_FROM)")
+		}
+		tm = team.New(st, mail, svc.BaseURL, log)
+	}
+	tools := mcp.BuildTools(svc)
+	if tm != nil {
+		tools = append(tools, mcp.TeamTools(tm)...)
+	}
+	server := mcp.NewServer("relay", version, tools)
 	server.ExtraInstructions = os.Getenv("RELAY_AGENT_INSTRUCTIONS")
 	draft := os.Getenv("RELAY_DRAFT_TOKEN")
 	if draft != "" && (len(draft) < 16 || draft == token) {
 		return errors.New("RELAY_DRAFT_TOKEN must be at least 16 characters and differ from RELAY_API_TOKEN")
 	}
 	a := &api.API{Svc: svc, MCP: server, Token: token, DraftToken: draft, Log: log, Version: version}
-	if os.Getenv("RELAY_UI") != "off" && svc.BaseURL != "" {
+	if uiOn {
 		dash, err := ui.New(svc.BaseURL, st, token, log)
 		if err != nil {
 			log.Warn("dashboard disabled", "err", err)
 		} else {
 			dash.RegistrationClosed = os.Getenv("RELAY_PASSKEY_REGISTRATION") == "off"
 			dash.Svc = svc
+			dash.Team = tm
 			a.UI = dash
 			if os.Getenv("RELAY_OAUTH") != "off" {
 				authz, err := oauth.New(svc.BaseURL, st, dash, log)

@@ -1,5 +1,6 @@
 "use strict";
-// Relay dashboard: passkey login, a read-only calendar, the drafts list and a full post preview.
+// Relay dashboard: passkey or email login, a read-only calendar, the drafts list, a full post preview, the
+// connected apps and the team.
 // Every value from the API is rendered with textContent (never innerHTML).
 
 const $ = (id) => document.getElementById(id);
@@ -16,7 +17,11 @@ const T = FR
       created: "Créé", updated: "Modifié", post: "Post", group: "Groupe", missing: "média introuvable", close: "Fermer",
       readOnly: "Lecture seule · approbation par approve_post", yes: "oui", no: "non", load: "Chargement impossible",
       apps: "Apps", noApps: "Aucune app connectée", full: "Accès complet", draftsOnly: "Brouillons", lastUsed: "utilisée",
-      revoke: "Révoquer" }
+      revoke: "Révoquer", email: "Email", sendLink: "Recevoir un lien", sent: "Lien envoyé, vérifiez vos emails.",
+      join: "Rejoindre", name: "Votre nom", continue: "Continuer", badLink: "Lien invalide ou expiré.",
+      team: "Équipe", invite: "Inviter", invited: "Invité", resend: "Renvoyer", cancel: "Annuler", remove: "Retirer",
+      addPasskey: "Ajouter une passkey", signOut: "Se déconnecter", by: "par", noEmail: "Email non configuré",
+      roles: { owner: "Propriétaire", admin: "Admin", editor: "Éditeur", viewer: "Lecteur" }, save: "OK" }
   : { signIn: "Sign in", addKey: "Add a key", token: "API token", create: "Create", week: "Week", day: "Day",
       empty: "Nothing planned", cancelled: "Cancelled.", failed: "Failed", unsupported: "This browser doesn't support passkeys.",
       added: "Key added.", dup: "This key already exists.", open: "Open",
@@ -28,7 +33,11 @@ const T = FR
       created: "Created", updated: "Updated", post: "Post", group: "Group", missing: "media not found", close: "Close",
       readOnly: "Read-only · approve with approve_post", yes: "yes", no: "no", load: "Could not load",
       apps: "Apps", noApps: "No connected apps", full: "Full access", draftsOnly: "Drafts only", lastUsed: "used",
-      revoke: "Revoke" };
+      revoke: "Revoke", email: "Email", sendLink: "Email me a link", sent: "Link sent, check your inbox.",
+      join: "Join", name: "Your name", continue: "Continue", badLink: "This link is invalid or expired.",
+      team: "Team", invite: "Invite", invited: "Invited", resend: "Resend", cancel: "Cancel", remove: "Remove",
+      addPasskey: "Add a passkey", signOut: "Sign out", by: "by", noEmail: "Email not configured",
+      roles: { owner: "Owner", admin: "Admin", editor: "Editor", viewer: "Viewer" }, save: "OK" };
 const NET_NAMES = { x: "X", instagram: "Instagram", facebook: "Facebook", threads: "Threads", "linkedin-page": "LinkedIn",
   youtube: "YouTube", tiktok: "TikTok", website: "Website" };
 
@@ -51,11 +60,13 @@ const HEART_ICON = "M12 20s-7-4.4-9.2-8.6C1.4 8.6 3.2 5 6.6 5c2 0 3.4 1.1 4.2 2.
 const COMMENT_ICON = "M21 12a8 8 0 0 1-11.6 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12z";
 const SHARE_ICON = "M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3";
 const SAVE_ICON = "M6 3h12v18l-6-4-6 4z";
+const TEAM_ICON = "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8";
+const ME_ICON = "M20 21v-1a5 5 0 0 0-5-5H9a5 5 0 0 0-5 5v1M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z";
 const APPS_ICON = "M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0zM12 16v5";
 const WARN_ICON = "M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z";
 
 const mobile = matchMedia("(max-width: 760px)");
-const state = { view: "week", day: startOfDay(new Date()), posts: [], loadedFrom: null, drafts: [] };
+const state = { me: null, view: "week", day: startOfDay(new Date()), posts: [], loadedFrom: null, drafts: [] };
 
 // ---------- helpers ----------
 
@@ -143,23 +154,73 @@ async function register(ev) {
   tokenEl.value = ""; // never keep the token around
   if (!token) return;
   try {
-    const opts = await api("register/begin", { method: "POST", body: { name: navigator.platform || "passkey" }, token });
-    const pk = opts.publicKey;
-    pk.challenge = b64uToBuf(pk.challenge);
-    pk.user.id = b64uToBuf(pk.user.id);
-    (pk.excludeCredentials || []).forEach((c) => (c.id = b64uToBuf(c.id)));
-    const cred = await navigator.credentials.create({ publicKey: pk });
-    const r = cred.response;
-    await api("register/finish", { method: "POST", token, body: {
-      id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
-      response: { attestationObject: bufToB64u(r.attestationObject), clientDataJSON: bufToB64u(r.clientDataJSON),
-        transports: r.getTransports ? r.getTransports() : [] },
-    } });
+    await addPasskey(token);
     $("register").hidden = true;
     say(T.added);
   } catch (e) {
     say(e.name === "InvalidStateError" ? T.dup : e.name === "NotAllowedError" ? T.cancelled : `${T.failed}: ${e.message}`, true);
   }
+}
+
+// addPasskey registers a passkey for the signed-in member, or with the API token for the first owner.
+async function addPasskey(token) {
+  const opts = await api("register/begin", { method: "POST", body: { name: navigator.platform || "passkey" }, token });
+  const pk = opts.publicKey;
+  pk.challenge = b64uToBuf(pk.challenge);
+  pk.user.id = b64uToBuf(pk.user.id);
+  (pk.excludeCredentials || []).forEach((c) => (c.id = b64uToBuf(c.id)));
+  const cred = await navigator.credentials.create({ publicKey: pk });
+  const r = cred.response;
+  await api("register/finish", { method: "POST", token, body: {
+    id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
+    response: { attestationObject: bufToB64u(r.attestationObject), clientDataJSON: bufToB64u(r.clientDataJSON),
+      transports: r.getTransports ? r.getTransports() : [] },
+  } });
+}
+
+async function emailLogin(ev) {
+  ev.preventDefault();
+  const input = $("email-input");
+  const email = input.value.trim();
+  if (!email) return;
+  const btn = $("email-btn");
+  btn.disabled = true;
+  try { await api("email/login", { method: "POST", body: { email } }); say(T.sent); input.value = ""; }
+  catch (e) { say(`${T.failed}: ${e.message}`, true); }
+  btn.disabled = false;
+}
+
+// ---------- links sent by email (/ui/accept, /ui/signin) ----------
+
+async function landing(kind) {
+  const token = new URLSearchParams(location.search).get("token") || "";
+  history.replaceState(null, "", "/ui/" + kind); // the token leaves the address bar
+  $("landing").hidden = false;
+  const btn = $("landing-btn"), msg = $("landing-msg"), name = $("landing-name");
+  const bad = () => { msg.textContent = T.badLink; msg.className = "msg err"; $("landing-form").hidden = true; };
+  if (kind === "accept") {
+    btn.textContent = T.join;
+    name.placeholder = T.name;
+    name.hidden = false;
+    try { const inv = await api("invite", { method: "POST", body: { token } }); $("landing-email").textContent = inv.email; }
+    catch { return bad(); }
+    name.focus();
+  } else {
+    btn.textContent = T.continue;
+  }
+  $("landing-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    btn.disabled = true;
+    try {
+      if (kind === "accept") await api("invite/accept", { method: "POST", body: { token, name: name.value.trim() } });
+      else await api("email/signin", { method: "POST", body: { token } });
+      location.replace("/ui/");
+    } catch (e) {
+      btn.disabled = false;
+      if (e.status === 400 && kind === "accept" && !name.value.trim()) return name.focus();
+      bad();
+    }
+  });
 }
 
 async function logout() {
@@ -649,6 +710,7 @@ async function openApps() {
     const info = el("div", "app-info");
     info.append(el("b", "", g.client_name || g.client_id));
     const meta = [g.scope === "relay:drafts" ? T.draftsOnly : T.full, day(g.created_at)];
+    if (g.approved_by) meta.push(`${T.by} ${g.approved_by}`);
     if (g.last_used_at) meta.push(`${T.lastUsed} ${day(g.last_used_at)}`);
     info.append(el("span", "app-meta", meta.join(" · ")));
     const btn = el("button", "app-revoke", T.revoke); btn.type = "button";
@@ -658,10 +720,155 @@ async function openApps() {
       catch (e) { btn.disabled = false; if (e.status === 401) { dlg.close(); showLogin(); } }
       if (!list.children.length) holder.replaceChildren(el("p", "empty", T.noApps));
     });
+    btn.hidden = g.can_revoke === false;
     row.append(info, btn);
     list.append(row);
   }
   holder.replaceChildren(list);
+}
+
+// ---------- sheets: account and team ----------
+
+function openSheet(title) {
+  const dlg = $("preview");
+  const body = $("preview-body");
+  const top = el("div", "pv-top");
+  const close = el("button", "icon"); close.type = "button"; close.setAttribute("aria-label", T.close); close.append(svg(CLOSE_ICON));
+  close.addEventListener("click", () => dlg.close());
+  const actions = el("div", "pv-actions");
+  actions.append(close);
+  top.append(el("div", "apps-title", title), actions);
+  const holder = el("div", "pv-body");
+  body.replaceChildren(top, holder);
+  if (!dlg.open) { lockPage(); dlg.showModal(); body.tabIndex = -1; body.focus({ preventScroll: true }); }
+  return holder;
+}
+
+function smallBtn(text, cls, fn) {
+  const b = el("button", "app-revoke " + (cls || ""), text); b.type = "button";
+  b.addEventListener("click", async () => {
+    b.disabled = true;
+    try { await fn(); } catch (e) { b.disabled = false; if (e.status === 401) { $("preview").close(); showLogin(); } else alert(e.message); }
+  });
+  return b;
+}
+
+async function openMe() {
+  let me = state.me;
+  try { const r = await api("me"); me = state.me = r; } catch { /* keep */ }
+  const u = (me && me.user) || {};
+  const holder = openSheet(u.name || u.email || "Relay");
+  const list = el("div", "apps");
+  const row = el("div", "app-row");
+  const info = el("div", "app-info");
+  info.append(el("b", "", u.email || "—"), el("span", "app-meta", [T.roles[u.role] || u.role, `${u.passkeys || 0} passkey${u.passkeys === 1 ? "" : "s"}`].join(" · ")));
+  row.append(info);
+  if (me && me.registration_open !== false && window.PublicKeyCredential) {
+    row.append(smallBtn(T.addPasskey, "plain", async () => {
+      try { await addPasskey(); } catch (e) { if (e.name === "NotAllowedError") return openMe(); throw e; }
+      openMe();
+    }));
+  }
+  list.append(row);
+  const out = el("button", "app-revoke", T.signOut); out.type = "button";
+  out.addEventListener("click", logout);
+  const foot = el("div", "sheet-foot");
+  foot.append(out);
+  holder.replaceChildren(list, foot);
+}
+
+function roleSelect(value, disabled, onChange) {
+  const s = el("select", "role");
+  for (const r of ["owner", "admin", "editor", "viewer"]) {
+    const o = el("option", "", T.roles[r]); o.value = r; o.selected = r === value;
+    s.append(o);
+  }
+  s.disabled = disabled;
+  s.addEventListener("change", () => onChange(s.value, s));
+  return s;
+}
+
+async function openTeam() {
+  const holder = openSheet(T.team);
+  holder.append(el("div", "pv-loading"));
+  let data;
+  try { data = await api("team"); }
+  catch (e) {
+    if (e.status === 401) { $("preview").close(); return showLogin(); }
+    return holder.replaceChildren(el("p", "pv-err", `${T.load}: ${e.message}`));
+  }
+  const meID = data.me;
+  const myRole = (data.members.find((m) => m.id === meID) || {}).role;
+  const parts = [];
+
+  if (data.email) {
+    const form = el("form", "invite");
+    const input = el("input"); input.type = "email"; input.required = true; input.placeholder = T.email; input.autocomplete = "off";
+    const role = roleSelect("editor", false, () => {});
+    if (myRole !== "owner") role.querySelector('option[value="owner"]').remove();
+    const go = el("button", "", T.invite); go.type = "submit";
+    form.append(input, role, go);
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      go.disabled = true;
+      try { await api("team/invite", { method: "POST", body: { email: input.value.trim(), role: role.value, lang: FR ? "fr" : "en" } }); openTeam(); }
+      catch (e) { go.disabled = false; alert(e.message); }
+    });
+    parts.push(form);
+  } else {
+    parts.push(el("p", "app-meta pad", T.noEmail));
+  }
+
+  const list = el("div", "apps");
+  const day = (t) => new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  for (const m of data.members) {
+    const row = el("div", "app-row" + (m.disabled ? " off" : ""));
+    const info = el("div", "app-info");
+    info.append(el("b", "", m.name || m.email || "—"));
+    const meta = [];
+    if (m.name && m.email) meta.push(m.email);
+    if (m.last_login_at) meta.push(day(m.last_login_at));
+    if (meta.length) info.append(el("span", "app-meta", meta.join(" · ")));
+    if (!m.email) {
+      const f = el("form", "inline");
+      const i = el("input"); i.type = "email"; i.required = true; i.placeholder = T.email;
+      const b = el("button", "", T.save); b.type = "submit";
+      f.append(i, b);
+      f.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        try { await api(`team/members/${encodeURIComponent(m.id)}`, { method: "POST", body: { email: i.value.trim() } }); openTeam(); }
+        catch (e) { alert(e.message); }
+      });
+      info.append(f);
+    }
+    const locked = m.role === "owner" && myRole !== "owner";
+    const sel = roleSelect(m.role, locked, async (v, s) => {
+      try { await api(`team/members/${encodeURIComponent(m.id)}`, { method: "POST", body: { role: v } }); }
+      catch (e) { s.value = m.role; alert(e.message); return; }
+      m.role = v;
+      if (m.id === meID) location.reload();
+    });
+    if (myRole !== "owner") { const o = sel.querySelector('option[value="owner"]'); if (o && m.role !== "owner") o.remove(); }
+    row.append(info, sel);
+    if (m.id !== meID && !locked) {
+      row.append(smallBtn(T.remove, "", async () => {
+        await api(`team/members/${encodeURIComponent(m.id)}/remove`, { method: "POST", body: {} });
+        row.remove();
+      }));
+    }
+    list.append(row);
+  }
+  for (const inv of data.invites) {
+    const row = el("div", "app-row pending");
+    const info = el("div", "app-info");
+    info.append(el("b", "", inv.email), el("span", "app-meta", `${T.invited} · ${T.roles[inv.role] || inv.role}`));
+    row.append(info);
+    if (data.email) row.append(smallBtn(T.resend, "plain", async () => { await api(`team/invites/${encodeURIComponent(inv.id)}/resend`, { method: "POST", body: {} }); openTeam(); }));
+    row.append(smallBtn(T.cancel, "", async () => { await api(`team/invites/${encodeURIComponent(inv.id)}/revoke`, { method: "POST", body: {} }); row.remove(); }));
+    list.append(row);
+  }
+  parts.push(list);
+  holder.replaceChildren(...parts);
 }
 
 // ---------- navigation ----------
@@ -673,6 +880,7 @@ function step(n) {
 function goToday() { state.day = startOfDay(new Date()); load(); }
 
 function showLogin() { $("app").hidden = true; $("login").hidden = false; }
+
 function showApp() { $("login").hidden = true; $("app").hidden = false; load(); loadDrafts(); }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -681,6 +889,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("reg-toggle").textContent = T.addKey;
   $("reg-token").placeholder = T.token;
   $("reg-btn").textContent = T.create;
+  $("email-input").placeholder = T.email;
+  $("email-btn").textContent = T.sendLink;
   $("v-week").textContent = T.week;
   $("v-day").textContent = T.day;
   $("drafts-label").textContent = T.drafts;
@@ -688,7 +898,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   signIn.addEventListener("click", login);
   $("reg-toggle").addEventListener("click", () => { $("register").hidden = !$("register").hidden; $("reg-token").focus(); });
   $("register").addEventListener("submit", register);
-  $("logout").addEventListener("click", logout);
+  $("email-form").addEventListener("submit", emailLogin);
+  $("me-btn").append(svg(ME_ICON));
+  $("me-btn").addEventListener("click", openMe);
+  $("team-btn").append(svg(TEAM_ICON));
+  $("team-btn").addEventListener("click", openTeam);
   $("apps-btn").append(svg(APPS_ICON));
   $("apps-btn").addEventListener("click", openApps);
   $("prev").addEventListener("click", () => step(-1));
@@ -726,13 +940,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (e.key === "d") { state.view = "day"; load(); }
   });
 
+  const path = location.pathname.replace(/\/+$/, "");
+  if (path === "/ui/accept" || path === "/ui/signin") return landing(path.slice(4));
+
   try {
-    const me = await api("me");
+    const me = state.me = await api("me");
     $("apps-btn").hidden = !me.apps;
+    $("team-btn").hidden = !me.team;
     if (me.logged_in) return showApp();
+    $("email-form").hidden = !me.email;
+    // No passkey yet: with email on, members sign in by email; the API token form stays folded.
+    if (!me.has_passkeys && me.email) $("login-btn").hidden = true;
     if (me.registration_open !== false) {
       $("reg-toggle").hidden = false;
-      if (!me.has_passkeys) $("register").hidden = false;
+      if (!me.has_passkeys && !me.email) $("register").hidden = false;
     }
   } catch { /* fall through to login */ }
   showLogin();

@@ -1,14 +1,17 @@
-// Package ui serves Relay's read-only dashboard: a week and day calendar of posts, behind passkey login.
+// Package ui serves Relay's dashboard: a week and day calendar of posts, the drafts, connected apps and the
+// team, behind passkey or email login.
 //
 // Security model:
-//   - Login is a WebAuthn passkey only (no password). User verification (PIN or biometrics) is required.
-//   - Adding a passkey requires the admin API token, so the dashboard grants nothing the token holder doesn't have.
+//   - Members sign in with a WebAuthn passkey (user verification required) or with a single-use sign-in link
+//     sent by email (see internal/team). A passkey signs in the member it was registered for.
+//   - A signed-in member adds passkeys for themselves. Without a session, adding a passkey requires the admin
+//     API token and registers it for the first owner (bootstrap).
 //   - A session is a random 256-bit cookie (__Host- prefix, Secure, HttpOnly, SameSite=Strict); only its SHA-256
-//     hash is stored. Sessions expire after SessionTTL.
+//     hash is stored. Sessions expire after SessionTTL. The member's role is read on every request.
 //   - State-changing calls are JSON POSTs checked against the expected Origin.
 //   - Strict CSP (no inline script), no framing, no caching of API responses.
-//   - The dashboard is read-only: it cannot publish, approve, edit or reply. The one exception is revoking an
-//     app connected with OAuth.
+//   - Roles: viewers and editors read; owners and admins also manage the team and revoke any app. The dashboard
+//     never publishes, approves, edits or replies.
 package ui
 
 import (
@@ -36,7 +39,9 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/Seeyko/relay/internal/core"
+	"github.com/Seeyko/relay/internal/oauth"
 	"github.com/Seeyko/relay/internal/store"
+	"github.com/Seeyko/relay/internal/team"
 )
 
 //go:embed static
@@ -55,11 +60,13 @@ type UI struct {
 	// Svc (optional) runs the pre-flight checks of the preview with the instance settings (timezone, media
 	// URLs). Without it, a bare service over Store is used.
 	Svc      *core.Service
-	APIToken string // required to register a passkey
+	APIToken string // registers a passkey for the first owner without a session (bootstrap)
 	// RegistrationClosed refuses new passkeys (RELAY_PASSKEY_REGISTRATION=off), even with the API token.
 	RegistrationClosed bool
 	// Apps shows the apps connected with OAuth (list and revoke). Set when OAuth is on.
 	Apps bool
+	// Team (optional) manages members: the Team sheet, invitations and, when email is configured, sign-in links.
+	Team *team.Team
 	Log  *slog.Logger
 
 	origin string // e.g. https://relay.example.com
@@ -76,6 +83,7 @@ type ceremony struct {
 	kind    string // "register" or "login"
 	session webauthn.SessionData
 	name    string
+	userID  string // register: the member the passkey is for
 	expires time.Time
 }
 
@@ -112,6 +120,12 @@ func (ui *UI) Register(mux *http.ServeMux) {
 	files := http.FileServerFS(sub)
 	mux.Handle("GET /ui/", ui.headers(http.StripPrefix("/ui/", files)))
 	mux.Handle("GET /ui", http.RedirectHandler("/ui/", http.StatusMovedPermanently))
+	// Landing pages of the links sent by email: the page itself, the token is posted by its script.
+	index := ui.headers(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFileFS(w, r, sub, "index.html")
+	}))
+	mux.Handle("GET /ui/accept", index)
+	mux.Handle("GET /ui/signin", index)
 
 	mux.Handle("GET /ui/api/me", ui.headers(http.HandlerFunc(ui.me)))
 	mux.Handle("POST /ui/api/register/begin", ui.headers(ui.post(ui.registerBegin)))
@@ -126,6 +140,9 @@ func (ui *UI) Register(mux *http.ServeMux) {
 	if ui.Apps {
 		mux.Handle("GET /ui/api/apps", ui.headers(ui.authed(ui.apps)))
 		mux.Handle("POST /ui/api/apps/{id}/revoke", ui.headers(ui.post(ui.authed(ui.revokeApp).ServeHTTP)))
+	}
+	if ui.Team != nil {
+		ui.registerTeam(mux)
 	}
 }
 
@@ -144,7 +161,7 @@ func (ui *UI) headers(next http.Handler) http.Handler {
 		if ui.secure {
 			h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		}
-		if strings.HasPrefix(r.URL.Path, "/ui/api/") {
+		if strings.HasPrefix(r.URL.Path, "/ui/api/") || r.URL.Path == "/ui/accept" || r.URL.Path == "/ui/signin" {
 			h.Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)
@@ -171,10 +188,34 @@ func (ui *UI) post(fn http.HandlerFunc) http.Handler {
 	})
 }
 
+type userKey struct{}
+
+// userFrom is the signed-in member of a request that went through authed.
+func userFrom(r *http.Request) *store.User {
+	u, _ := r.Context().Value(userKey{}).(*store.User)
+	return u
+}
+
 func (ui *UI) authed(fn http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !ui.loggedIn(r) {
+		u, _ := ui.sessionUser(r)
+		if u == nil {
 			jsonErr(w, http.StatusUnauthorized, "login required")
+			return
+		}
+		fn(w, r.WithContext(context.WithValue(r.Context(), userKey{}, u)))
+	})
+}
+
+func isAdmin(u *store.User) bool {
+	return u != nil && (u.Role == store.RoleOwner || u.Role == store.RoleAdmin)
+}
+
+// admin is authed for owners and admins only.
+func (ui *UI) admin(fn http.HandlerFunc) http.Handler {
+	return ui.authed(func(w http.ResponseWriter, r *http.Request) {
+		if !isAdmin(userFrom(r)) {
+			jsonErr(w, http.StatusForbidden, "owners and admins only")
 			return
 		}
 		fn(w, r)
@@ -244,13 +285,41 @@ func (ui *UI) setCookie(w http.ResponseWriter, name, value string, maxAge int) {
 	})
 }
 
-func (ui *UI) loggedIn(r *http.Request) bool {
+// sessionUser returns the active member of the session cookie of r and the session's hash.
+func (ui *UI) sessionUser(r *http.Request) (*store.User, string) {
 	c, err := r.Cookie(ui.cookieName(cookieSession))
 	if err != nil || len(c.Value) < 40 {
-		return false
+		return nil, ""
 	}
-	ok, err := ui.Store.UISessionValid(r.Context(), hashToken(c.Value))
-	return err == nil && ok
+	h := hashToken(c.Value)
+	u, err := ui.Store.SessionUser(r.Context(), h)
+	if err != nil {
+		return nil, ""
+	}
+	return u, h
+}
+
+// startSession signs u in: a new session cookie. method is passkey or email.
+func (ui *UI) startSession(w http.ResponseWriter, r *http.Request, u *store.User, passkeyID, method string) error {
+	tok := randomToken()
+	if err := ui.Store.CreateSession(r.Context(), hashToken(tok), u.ID, passkeyID, method, ui.now().Add(SessionTTL)); err != nil {
+		return err
+	}
+	ui.setCookie(w, cookieSession, tok, int(SessionTTL.Seconds()))
+	if ui.Team != nil {
+		ui.Team.Audit(r.Context(), team.ActorFor(u, clientIP(r)), "login", u.Email, "method="+method)
+	} else {
+		ui.Log.Info("dashboard: login", "user", u.ID, "method", method, "ip", clientIP(r))
+	}
+	return nil
+}
+
+type meUser struct {
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	Passkeys int    `json:"passkeys"`
 }
 
 func (ui *UI) me(w http.ResponseWriter, r *http.Request) {
@@ -258,12 +327,19 @@ func (ui *UI) me(w http.ResponseWriter, r *http.Request) {
 	if pks, err := ui.Store.ListPasskeys(r.Context()); err == nil {
 		n = len(pks)
 	}
-	writeJSON(w, 200, map[string]any{"logged_in": ui.loggedIn(r), "has_passkeys": n > 0, "registration_open": !ui.RegistrationClosed, "apps": ui.Apps})
+	out := map[string]any{"logged_in": false, "has_passkeys": n > 0, "registration_open": !ui.RegistrationClosed, "apps": ui.Apps,
+		"email": ui.Team.EmailOn(), "team": false}
+	if u, _ := ui.sessionUser(r); u != nil {
+		out["logged_in"] = true
+		out["user"] = meUser{ID: u.ID, Email: u.Email, Name: u.Name, Role: u.Role, Passkeys: u.Passkeys}
+		out["team"] = ui.Team != nil && isAdmin(u)
+	}
+	writeJSON(w, 200, out)
 }
 
 func (ui *UI) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(ui.cookieName(cookieSession)); err == nil {
-		_ = ui.Store.DeleteUISession(r.Context(), hashToken(c.Value))
+		_ = ui.Store.DeleteSession(r.Context(), hashToken(c.Value))
 	}
 	ui.setCookie(w, cookieSession, "", -1)
 	w.WriteHeader(http.StatusNoContent)
@@ -271,32 +347,37 @@ func (ui *UI) logout(w http.ResponseWriter, r *http.Request) {
 
 // ---------- WebAuthn ceremonies ----------
 
-// owner is the single dashboard user. Its handle is a fixed opaque value (no personal data).
-type owner struct{ creds []webauthn.Credential }
+// waUser is one member as WebAuthn sees it. Its handle is opaque (no personal data): the user id, or
+// store.LegacyOwnerHandle for the first owner.
+type waUser struct {
+	u     *store.User
+	creds []webauthn.Credential
+	byID  map[string]*store.Passkey
+}
 
-var ownerID = []byte("relay-owner")
+// ownerID is the handle of the passkeys registered before team members (and of the first owner).
+var ownerID = []byte(store.LegacyOwnerHandle)
 
-func (o *owner) WebAuthnID() []byte                         { return ownerID }
-func (o *owner) WebAuthnName() string                       { return "relay" }
-func (o *owner) WebAuthnDisplayName() string                { return "Relay owner" }
-func (o *owner) WebAuthnCredentials() []webauthn.Credential { return o.creds }
+func (w *waUser) WebAuthnID() []byte                         { return []byte(w.u.WebAuthnID) }
+func (w *waUser) WebAuthnName() string                       { return "relay" }
+func (w *waUser) WebAuthnDisplayName() string                { return "Relay" }
+func (w *waUser) WebAuthnCredentials() []webauthn.Credential { return w.creds }
 
-func (ui *UI) loadOwner(ctx context.Context) (*owner, map[string]*store.Passkey, error) {
-	pks, err := ui.Store.ListPasskeys(ctx)
+func (ui *UI) loadWAUser(ctx context.Context, u *store.User) (*waUser, error) {
+	pks, err := ui.Store.ListPasskeys(ctx, u.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	o := &owner{}
-	byID := map[string]*store.Passkey{}
+	w := &waUser{u: u, byID: map[string]*store.Passkey{}}
 	for _, p := range pks {
 		var c webauthn.Credential
 		if err := json.Unmarshal([]byte(p.Credential), &c); err != nil {
 			continue
 		}
-		o.creds = append(o.creds, c)
-		byID[p.ID] = p
+		w.creds = append(w.creds, c)
+		w.byID[p.ID] = p
 	}
-	return o, byID, nil
+	return w, nil
 }
 
 func (ui *UI) startCeremony(w http.ResponseWriter, c ceremony) bool {
@@ -340,14 +421,35 @@ func (ui *UI) tokenOK(r *http.Request) bool {
 	return ui.APIToken != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(ui.APIToken)) == 1
 }
 
+// registrant is who a new passkey is for: the signed-in member, or the first owner with the API token (created
+// on a fresh instance).
+func (ui *UI) registrant(r *http.Request) (*store.User, error) {
+	if u, _ := ui.sessionUser(r); u != nil {
+		return u, nil
+	}
+	if !ui.tokenOK(r) {
+		return nil, nil
+	}
+	u, err := ui.Store.FirstOwner(r.Context())
+	if errors.Is(err, store.ErrNotFound) {
+		return ui.Store.CreateUser(r.Context(), &store.User{Role: store.RoleOwner, WebAuthnID: store.LegacyOwnerHandle})
+	}
+	return u, err
+}
+
 func (ui *UI) registerBegin(w http.ResponseWriter, r *http.Request) {
 	if ui.RegistrationClosed {
 		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_PASSKEY_REGISTRATION=off)")
 		return
 	}
-	if !ui.tokenOK(r) {
-		ui.Log.Warn("dashboard: passkey registration refused (bad API token)", "ip", clientIP(r))
-		jsonErr(w, http.StatusUnauthorized, "the admin API token is required to add a passkey")
+	u, err := ui.registrant(r)
+	if err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	if u == nil {
+		ui.Log.Warn("dashboard: passkey registration refused (no session, bad API token)", "ip", clientIP(r))
+		jsonErr(w, http.StatusUnauthorized, "sign in, or give the admin API token, to add a passkey")
 		return
 	}
 	var in struct {
@@ -361,24 +463,24 @@ func (ui *UI) registerBegin(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = "passkey"
 	}
-	o, _, err := ui.loadOwner(r.Context())
+	wu, err := ui.loadWAUser(r.Context(), u)
 	if err != nil {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	creation, sess, err := ui.wa.BeginRegistration(o,
+	creation, sess, err := ui.wa.BeginRegistration(wu,
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			ResidentKey:      protocol.ResidentKeyRequirementRequired,
 			UserVerification: protocol.VerificationRequired,
 		}),
-		webauthn.WithExclusions(webauthn.Credentials(o.creds).CredentialDescriptors()),
+		webauthn.WithExclusions(webauthn.Credentials(wu.creds).CredentialDescriptors()),
 	)
 	if err != nil {
 		jsonErr(w, 500, "could not start registration")
 		return
 	}
-	if !ui.startCeremony(w, ceremony{kind: "register", session: *sess, name: name}) {
+	if !ui.startCeremony(w, ceremony{kind: "register", session: *sess, name: name, userID: u.ID}) {
 		jsonErr(w, http.StatusTooManyRequests, "too many pending logins, retry in a few minutes")
 		return
 	}
@@ -390,33 +492,42 @@ func (ui *UI) registerFinish(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusForbidden, "adding passkeys is disabled (RELAY_PASSKEY_REGISTRATION=off)")
 		return
 	}
-	if !ui.tokenOK(r) {
-		jsonErr(w, http.StatusUnauthorized, "the admin API token is required to add a passkey")
-		return
-	}
-	cer, ok := ui.takeCeremony(w, r, "register")
-	if !ok {
-		jsonErr(w, http.StatusBadRequest, "registration expired, start again")
-		return
-	}
-	o, _, err := ui.loadOwner(r.Context())
+	u, err := ui.registrant(r)
 	if err != nil {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	cred, err := ui.wa.FinishRegistration(o, cer.session, r)
+	if u == nil {
+		jsonErr(w, http.StatusUnauthorized, "sign in, or give the admin API token, to add a passkey")
+		return
+	}
+	cer, ok := ui.takeCeremony(w, r, "register")
+	if !ok || cer.userID != u.ID { // the ceremony was started for this very member
+		jsonErr(w, http.StatusBadRequest, "registration expired, start again")
+		return
+	}
+	wu, err := ui.loadWAUser(r.Context(), u)
+	if err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	cred, err := ui.wa.FinishRegistration(wu, cer.session, r)
 	if err != nil {
 		ui.Log.Warn("dashboard: passkey registration failed", "err", err)
 		jsonErr(w, http.StatusBadRequest, "passkey rejected")
 		return
 	}
 	raw, _ := json.Marshal(cred)
-	pk := &store.Passkey{ID: base64.RawURLEncoding.EncodeToString(cred.ID), Name: cer.name, Credential: string(raw)}
+	pk := &store.Passkey{ID: base64.RawURLEncoding.EncodeToString(cred.ID), UserID: u.ID, Name: cer.name, Credential: string(raw)}
 	if err := ui.Store.AddPasskey(r.Context(), pk); err != nil {
 		jsonErr(w, 500, "could not save the passkey")
 		return
 	}
-	ui.Log.Info("dashboard: passkey added", "name", pk.Name)
+	if ui.Team != nil {
+		ui.Team.Audit(r.Context(), team.ActorFor(u, clientIP(r)), "passkey.add", u.Email, pk.Name)
+	} else {
+		ui.Log.Info("dashboard: passkey added", "name", pk.Name)
+	}
 	writeJSON(w, 200, map[string]any{"ok": true, "name": pk.Name})
 }
 
@@ -444,7 +555,7 @@ func (ui *UI) loginFinish(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "unreadable body")
 		return
 	}
-	pk, err := ui.verifyAssertion(r.Context(), cer.session, body)
+	u, pk, err := ui.verifyAssertion(r.Context(), cer.session, body, nil)
 	if errors.Is(err, errStorage) {
 		jsonErr(w, 500, "storage error")
 		return
@@ -454,94 +565,116 @@ func (ui *UI) loginFinish(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusUnauthorized, "login failed")
 		return
 	}
-	tok := randomToken()
-	if err := ui.Store.CreateUISession(r.Context(), hashToken(tok), pk.ID, ui.now().Add(SessionTTL)); err != nil {
+	if err := ui.startSession(w, r, u, pk.ID, "passkey"); err != nil {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	ui.setCookie(w, cookieSession, tok, int(SessionTTL.Seconds()))
-	ui.Log.Info("dashboard: login", "passkey", pk.Name, "ip", clientIP(r))
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 
 var errStorage = errors.New("storage error")
 
-// verifyAssertion checks a discoverable, user-verified assertion of one of the owner's passkeys against the
-// ceremony session, and stores the new sign count.
-func (ui *UI) verifyAssertion(ctx context.Context, sess webauthn.SessionData, body []byte) (*store.Passkey, error) {
-	o, byID, err := ui.loadOwner(ctx)
-	if err != nil {
-		return nil, errStorage
-	}
-	if len(o.creds) == 0 {
-		return nil, errors.New("no passkey registered")
-	}
+// verifyAssertion checks a user-verified assertion against the ceremony session and stores the new sign count.
+// With only (a member), the passkey must be one of that member's; otherwise the passkey says who signs in.
+func (ui *UI) verifyAssertion(ctx context.Context, sess webauthn.SessionData, body []byte, only *store.User) (*store.User, *store.Passkey, error) {
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var wu *waUser
 	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
-		if subtle.ConstantTimeCompare(userHandle, ownerID) != 1 {
+		pks, err := ui.Store.ListPasskeys(ctx)
+		if err != nil {
+			return nil, errStorage
+		}
+		id := base64.RawURLEncoding.EncodeToString(rawID)
+		var owner string
+		for _, p := range pks {
+			if p.ID == id {
+				owner = p.UserID
+			}
+		}
+		if owner == "" {
+			return nil, errors.New("unknown passkey")
+		}
+		u, err := ui.Store.GetUser(ctx, owner)
+		if err != nil {
 			return nil, errors.New("unknown user")
 		}
-		return o, nil
+		if u.Disabled {
+			return nil, errors.New("member disabled")
+		}
+		if only != nil && u.ID != only.ID {
+			return nil, errors.New("passkey of another member")
+		}
+		if subtle.ConstantTimeCompare(userHandle, []byte(u.WebAuthnID)) != 1 {
+			return nil, errors.New("unknown user")
+		}
+		if wu, err = ui.loadWAUser(ctx, u); err != nil {
+			return nil, errStorage
+		}
+		return wu, nil
 	}
 	cred, err := ui.wa.ValidateDiscoverableLogin(handler, sess, parsed)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, errStorage) {
+			return nil, nil, errStorage
+		}
+		return nil, nil, err
 	}
 	if cred.Authenticator.CloneWarning {
-		return nil, errors.New("passkey sign counter went backwards (possible clone)")
+		return nil, nil, errors.New("passkey sign counter went backwards (possible clone)")
 	}
 	if !cred.Flags.UserVerified {
-		return nil, errors.New("user verification missing")
+		return nil, nil, errors.New("user verification missing")
 	}
 	id := base64.RawURLEncoding.EncodeToString(cred.ID)
-	pk, ok := byID[id]
+	pk, ok := wu.byID[id]
 	if !ok {
-		return nil, errors.New("unknown passkey")
+		return nil, nil, errors.New("unknown passkey")
 	}
 	raw, _ := json.Marshal(cred)
 	if err := ui.Store.TouchPasskey(ctx, id, string(raw)); err != nil {
-		return nil, errStorage
+		return nil, nil, errStorage
 	}
-	return pk, nil
+	return wu.u, pk, nil
 }
 
 // ---------- OAuth consent (implements oauth.Passkeys) ----------
 
-// SessionID returns the hash of the valid dashboard session cookie of r.
-func (ui *UI) SessionID(r *http.Request) (string, bool) {
-	c, err := r.Cookie(ui.cookieName(cookieSession))
-	if err != nil || len(c.Value) < 40 {
-		return "", false
+// Session returns the hash of the valid dashboard session cookie of r and its member.
+func (ui *UI) Session(r *http.Request) (string, *oauth.Member, bool) {
+	u, h := ui.sessionUser(r)
+	if u == nil {
+		return "", nil, false
 	}
-	h := hashToken(c.Value)
-	ok, err := ui.Store.UISessionValid(r.Context(), h)
-	return h, err == nil && ok
+	return h, &oauth.Member{ID: u.ID, Email: u.Email, Name: u.Name, Role: u.Role, HasPasskey: u.Passkeys > 0}, true
 }
 
-func (ui *UI) HasPasskeys(ctx context.Context) bool {
+// LoginMethods tells the signed-out consent page how it can sign in.
+func (ui *UI) LoginMethods(ctx context.Context) (passkey, email bool) {
 	pks, err := ui.Store.ListPasskeys(ctx)
-	return err == nil && len(pks) > 0
+	return err == nil && len(pks) > 0, ui.Team.EmailOn()
 }
 
-// BeginAssertion starts a fresh passkey check (user verification required). The state lives with the caller.
-func (ui *UI) BeginAssertion() (any, any, error) {
+// BeginAssertion starts a fresh passkey check of the member (user verification required). The state lives
+// with the caller.
+func (ui *UI) BeginAssertion(ctx context.Context, userID string) (any, any, error) {
 	assertion, sess, err := ui.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		return nil, nil, err
 	}
-	return assertion, &assertionState{session: *sess, expires: ui.now().Add(ceremonyTTL)}, nil
+	return assertion, &assertionState{session: *sess, userID: userID, expires: ui.now().Add(ceremonyTTL)}, nil
 }
 
 type assertionState struct {
 	session webauthn.SessionData
+	userID  string
 	expires time.Time
 }
 
-// FinishAssertion verifies the answer to BeginAssertion.
-func (ui *UI) FinishAssertion(ctx context.Context, state any, credential []byte) error {
+// FinishAssertion verifies the answer to BeginAssertion: a passkey of that same member.
+func (ui *UI) FinishAssertion(ctx context.Context, userID string, state any, credential []byte) error {
 	st, ok := state.(*assertionState)
 	if !ok || st == nil {
 		return errors.New("no passkey check in progress")
@@ -549,12 +682,40 @@ func (ui *UI) FinishAssertion(ctx context.Context, state any, credential []byte)
 	if ui.now().After(st.expires) {
 		return errors.New("passkey check expired")
 	}
-	pk, err := ui.verifyAssertion(ctx, st.session, credential)
+	if st.userID != userID {
+		return errors.New("passkey check of another member")
+	}
+	u, err := ui.Store.GetUser(ctx, userID)
 	if err != nil {
 		return err
 	}
-	ui.Log.Info("dashboard: passkey check for an app approval", "passkey", pk.Name)
+	_, pk, err := ui.verifyAssertion(ctx, st.session, credential, u)
+	if err != nil {
+		return err
+	}
+	ui.Log.Info("dashboard: passkey check for an app approval", "passkey", pk.Name, "user", u.ID)
 	return nil
+}
+
+// EmailCodes reports whether the fresh check can be a code sent by email.
+func (ui *UI) EmailCodes() bool { return ui.Team.EmailOn() }
+
+func (ui *UI) SendCode(ctx context.Context, userID, app, lang, ip string) error {
+	if !ui.Team.EmailOn() {
+		return team.ErrNoEmail
+	}
+	u, err := ui.Store.GetUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	return ui.Team.SendCode(ctx, u, app, lang, ip)
+}
+
+func (ui *UI) CheckCode(ctx context.Context, userID, code string) error {
+	if !ui.Team.EmailOn() {
+		return team.ErrNoEmail
+	}
+	return ui.Team.CheckCode(ctx, userID, code)
 }
 
 // ---------- connected apps (OAuth grants) ----------
@@ -565,11 +726,22 @@ func (ui *UI) apps(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"apps": gs})
+	u := userFrom(r)
+	type app struct {
+		*store.OAuthGrant
+		CanRevoke bool `json:"can_revoke"`
+	}
+	out := make([]app, 0, len(gs))
+	for _, g := range gs {
+		out = append(out, app{g, isAdmin(u) || g.UserID == u.ID})
+	}
+	writeJSON(w, 200, map[string]any{"apps": out})
 }
 
+// revokeApp: owners and admins revoke any app, other members the apps they approved.
 func (ui *UI) revokeApp(w http.ResponseWriter, r *http.Request) {
-	err := ui.Store.DeleteOAuthGrant(r.Context(), r.PathValue("id"))
+	u := userFrom(r)
+	g, err := ui.Store.GetOAuthGrant(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrNotFound) {
 		jsonErr(w, http.StatusNotFound, "not found")
 		return
@@ -578,7 +750,19 @@ func (ui *UI) revokeApp(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	ui.Log.Info("dashboard: app revoked", "grant", r.PathValue("id"), "ip", clientIP(r))
+	if !isAdmin(u) && g.UserID != u.ID {
+		jsonErr(w, http.StatusForbidden, "owners and admins only")
+		return
+	}
+	if err := ui.Store.DeleteOAuthGrant(r.Context(), g.ID); err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	if ui.Team != nil {
+		ui.Team.Audit(r.Context(), team.ActorFor(u, clientIP(r)), "app.revoke", g.ClientName, g.ID)
+	} else {
+		ui.Log.Info("dashboard: app revoked", "grant", g.ID, "ip", clientIP(r))
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -782,7 +966,7 @@ func (ui *UI) preview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (ui *UI) passkeys(w http.ResponseWriter, r *http.Request) {
-	pks, err := ui.Store.ListPasskeys(r.Context())
+	pks, err := ui.Store.ListPasskeys(r.Context(), userFrom(r).ID)
 	if err != nil {
 		jsonErr(w, 500, "storage error")
 		return

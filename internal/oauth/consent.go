@@ -32,7 +32,8 @@ type pending struct {
 	expires     time.Time
 
 	assertion        any    // WebAuthn state of the fresh assertion in progress
-	assertionSession string // dashboard session that started it
+	assertionSession string // dashboard session that started the fresh check
+	check            string // the fresh check in progress: "passkey" or "email"
 }
 
 func (s *Server) registerConsent(mux *http.ServeMux) {
@@ -242,31 +243,47 @@ type consentIn struct {
 	CSRF       string          `json:"csrf"`
 	Scope      string          `json:"scope"`
 	Credential json.RawMessage `json:"credential"`
+	Code       string          `json:"code"`
 }
 
-// consentCheck loads the request and checks the session and the CSRF token.
-func (s *Server) consentCheck(w http.ResponseWriter, r *http.Request) (*pending, string, consentIn, bool) {
+// consentCheck loads the request and checks the session, the CSRF token and that the member may approve.
+func (s *Server) consentCheck(w http.ResponseWriter, r *http.Request) (*pending, string, *Member, consentIn, bool) {
 	var in consentIn
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		jsonErr(w, 400, "invalid JSON")
-		return nil, "", in, false
+		return nil, "", nil, in, false
 	}
 	p := s.getPending(in.Req)
 	if p == nil {
 		jsonErr(w, http.StatusNotFound, "expired")
-		return nil, "", in, false
+		return nil, "", nil, in, false
 	}
-	sid, ok := s.Passkeys.SessionID(r)
+	sid, m, ok := s.Passkeys.Session(r)
 	if !ok {
 		jsonErr(w, http.StatusUnauthorized, "login required")
-		return nil, "", in, false
+		return nil, "", nil, in, false
 	}
 	if in.CSRF == "" || subtle.ConstantTimeCompare([]byte(in.CSRF), []byte(s.csrf(sid, p))) != 1 {
 		s.Log.Warn("oauth: consent refused (bad CSRF token)", "ip", clientIP(r))
 		jsonErr(w, http.StatusForbidden, "bad CSRF token")
-		return nil, "", in, false
+		return nil, "", nil, in, false
 	}
-	return p, sid, in, true
+	if len(ScopesFor(m.Role, p.scopes)) == 0 {
+		jsonErr(w, http.StatusForbidden, "your role cannot approve apps")
+		return nil, "", nil, in, false
+	}
+	return p, sid, m, in, true
+}
+
+// freshMethod is the check that gates an approval: the member's passkey, else a code sent by email.
+func (s *Server) freshMethod(m *Member) string {
+	switch {
+	case m.HasPasskey:
+		return "passkey"
+	case m.Email != "" && s.Passkeys.EmailCodes():
+		return "email"
+	}
+	return ""
 }
 
 func (s *Server) consentState(w http.ResponseWriter, r *http.Request) {
@@ -280,53 +297,93 @@ func (s *Server) consentState(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusNotFound, "expired")
 		return
 	}
-	out := map[string]any{"logged_in": false, "has_passkeys": s.Passkeys.HasPasskeys(r.Context()), "scopes": p.scopes}
-	if sid, ok := s.Passkeys.SessionID(r); ok {
+	pk, em := s.Passkeys.LoginMethods(r.Context())
+	out := map[string]any{"logged_in": false, "has_passkeys": pk, "email": em, "scopes": p.scopes}
+	if sid, m, ok := s.Passkeys.Session(r); ok {
 		out["logged_in"] = true
 		out["csrf"] = s.csrf(sid, p)
+		out["scopes"] = ScopesFor(m.Role, p.scopes)
+		out["can_approve"] = len(ScopesFor(m.Role, p.scopes)) > 0
+		out["method"] = s.freshMethod(m)
 	}
 	writeJSON(w, 200, out)
 }
 
-// approveBegin starts the fresh passkey assertion that gates the approval.
+// approveBegin starts the fresh check that gates the approval: a passkey assertion of the member, or a code
+// sent to the member's address when it has no passkey.
 func (s *Server) approveBegin(w http.ResponseWriter, r *http.Request) {
-	p, sid, _, ok := s.consentCheck(w, r)
+	p, sid, m, _, ok := s.consentCheck(w, r)
 	if !ok {
 		return
 	}
-	opts, st, err := s.Passkeys.BeginAssertion()
-	if err != nil {
-		jsonErr(w, 500, "could not start the passkey check")
-		return
+	switch s.freshMethod(m) {
+	case "passkey":
+		opts, st, err := s.Passkeys.BeginAssertion(r.Context(), m.ID)
+		if err != nil {
+			jsonErr(w, 500, "could not start the passkey check")
+			return
+		}
+		s.mu.Lock()
+		p.assertion, p.assertionSession, p.check = st, sid, "passkey"
+		s.mu.Unlock()
+		writeJSON(w, 200, opts)
+	case "email":
+		name := p.client.Name
+		if name == "" {
+			name = p.client.ID
+		}
+		if err := s.Passkeys.SendCode(r.Context(), m.ID, name, r.Header.Get("Accept-Language"), clientIP(r)); err != nil {
+			s.Log.Warn("oauth: approval code not sent", "client", p.client.ID, "err", err)
+			jsonErr(w, http.StatusTooManyRequests, "could not send the code, retry in a few minutes")
+			return
+		}
+		s.mu.Lock()
+		p.assertion, p.assertionSession, p.check = nil, sid, "email"
+		s.mu.Unlock()
+		writeJSON(w, 200, map[string]string{"method": "email"})
+	default:
+		jsonErr(w, http.StatusConflict, "add a passkey in the dashboard first")
 	}
-	s.mu.Lock()
-	p.assertion, p.assertionSession = st, sid
-	s.mu.Unlock()
-	writeJSON(w, 200, opts)
 }
 
 // approveFinish verifies the fresh assertion, then issues the code and sends the app's address back.
 func (s *Server) approveFinish(w http.ResponseWriter, r *http.Request) {
-	p, sid, in, ok := s.consentCheck(w, r)
+	p, sid, m, in, ok := s.consentCheck(w, r)
 	if !ok {
 		return
 	}
-	if !allowed(p.scopes, in.Scope) {
+	if !allowed(ScopesFor(m.Role, p.scopes), in.Scope) {
 		jsonErr(w, 400, "scope not allowed")
 		return
 	}
 	s.mu.Lock()
-	st, stSession := p.assertion, p.assertionSession
-	p.assertion, p.assertionSession = nil, "" // each assertion challenge is usable once
+	st, stSession, check := p.assertion, p.assertionSession, p.check
+	if check == "passkey" {
+		p.assertion, p.assertionSession, p.check = nil, "", "" // each assertion challenge is usable once
+	}
 	s.mu.Unlock()
-	if st == nil || stSession != sid {
-		jsonErr(w, http.StatusBadRequest, "passkey check expired, start again")
+	if stSession != sid || check == "" {
+		jsonErr(w, http.StatusBadRequest, "check expired, start again")
 		return
 	}
-	if err := s.Passkeys.FinishAssertion(r.Context(), st, in.Credential); err != nil {
-		s.Log.Warn("oauth: approval refused (passkey check failed)", "client", p.client.ID, "ip", clientIP(r), "err", err)
-		jsonErr(w, http.StatusUnauthorized, "passkey check failed")
-		return
+	switch check {
+	case "passkey":
+		if st == nil {
+			jsonErr(w, http.StatusBadRequest, "check expired, start again")
+			return
+		}
+		if err := s.Passkeys.FinishAssertion(r.Context(), m.ID, st, in.Credential); err != nil {
+			s.Log.Warn("oauth: approval refused (passkey check failed)", "client", p.client.ID, "ip", clientIP(r), "err", err)
+			jsonErr(w, http.StatusUnauthorized, "passkey check failed")
+			return
+		}
+	case "email":
+		// The code itself is single use and allows 5 attempts (the store counts them).
+		if err := s.Passkeys.CheckCode(r.Context(), m.ID, in.Code); err != nil {
+			s.Log.Warn("oauth: approval refused (email code)", "client", p.client.ID, "ip", clientIP(r), "err", err)
+			jsonErr(w, http.StatusUnauthorized, "wrong or expired code")
+			return
+		}
 	}
 	if s.takePending(p.id) == nil { // approved twice at the same time: only one code
 		jsonErr(w, http.StatusNotFound, "expired")
@@ -336,12 +393,12 @@ func (s *Server) approveFinish(w http.ResponseWriter, r *http.Request) {
 	now := s.Now()
 	if err := s.Store.CreateOAuthCode(r.Context(), &store.OAuthCode{
 		Hash: hashToken(code), ClientID: p.client.ID, RedirectURI: p.redirectURI, Challenge: p.challenge,
-		Scope: in.Scope, Resource: p.resource, CreatedAt: now, ExpiresAt: now.Add(CodeTTL),
+		Scope: in.Scope, Resource: p.resource, UserID: m.ID, CreatedAt: now, ExpiresAt: now.Add(CodeTTL),
 	}); err != nil {
 		jsonErr(w, 500, "storage error")
 		return
 	}
-	s.Log.Info("oauth: app approved", "client", p.client.ID, "name", p.client.Name, "scope", in.Scope, "ip", clientIP(r))
+	s.Log.Info("oauth: app approved", "client", p.client.ID, "name", p.client.Name, "scope", in.Scope, "user", m.ID, "check", check, "ip", clientIP(r))
 	writeJSON(w, 200, map[string]string{"redirect": s.redirectTo(p.redirectURI, url.Values{"code": {code}}, p.state)})
 }
 

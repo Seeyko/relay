@@ -98,6 +98,8 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_S3_PUBLIC_URL` | | Public base URL of the bucket (custom domain or r2.dev). Empty: the bucket stays private and Relay serves media at `/media/` |
 | `RELAY_UI` | `on` | `off` disables the read-only dashboard at `/ui/` |
 | `RELAY_PASSKEY_REGISTRATION` | `on` | `off` refuses new passkeys, even with the API token (existing ones keep working) |
+| `RELAY_OWNER_EMAIL` | | Email of the first owner (see [Team](#team)). Fills an empty owner email; never replaces one |
+| `RELAY_RESEND_API_KEY`, `RELAY_EMAIL_FROM` | | Send invitations, sign-in links and approval codes with [Resend](https://resend.com), from e.g. `RideMyPark <no-reply@ridemypark.com>`. Both or neither. Without them, email features are off |
 | `RELAY_OAUTH` | `on` | `off` disables OAuth for agents (see [Connect an agent with OAuth](#connect-an-agent-with-oauth)). It is also off when the dashboard is off |
 | `RELAY_DRAFT_TOKEN` | | Optional second key that can only create and edit drafts |
 | `RELAY_WEBHOOK_URL` / `RELAY_WEBHOOK_SECRET` | | Webhook target and HMAC secret |
@@ -118,7 +120,7 @@ and keep working.
 
 ## Dashboard
 
-A minimal, read-only dashboard at `https://<your-host>/ui/`:
+A minimal, read-only dashboard at `https://<your-host>/ui/`, for you and your [team](#team):
 
 - **Calendar**: week and day views of every post across networks. Drafts with a planned time (`planned_at`) show at
   that time with a dashed outline and a "Draft" label.
@@ -131,14 +133,50 @@ A minimal, read-only dashboard at `https://<your-host>/ui/`:
   `RELAY_TIMEZONE`, the status and errors, and the provider's pre-flight problems, run server-side.
 
 It cannot publish, approve or edit anything: approve drafts with `approve_post` (or `POST /v1/posts/{id}/approve`).
-The one thing it changes: the **Apps** sheet (header button) lists the agents connected with OAuth (name, access,
-date, last use) and revokes them.
+What it changes: the **Apps** sheet (header button) lists the agents connected with OAuth (name, access, who
+approved, date, last use) and revokes them; the **Team** sheet manages members.
 Media are served through Relay at `/media/`, so previews work with a private bucket.
 
-Login is passkey-only (WebAuthn, with user verification: Touch ID, Windows Hello, a security key...). To add a
-passkey, open the page, expand "Add a passkey" and enter `RELAY_API_TOKEN` once. Once your keys are added, set `RELAY_PASSKEY_REGISTRATION=off` to close registration. Sessions last 12 hours and use a
-`__Host-` cookie (Secure, HttpOnly, SameSite=Strict). The dashboard needs `RELAY_BASE_URL` on https; set
-`RELAY_UI=off` to disable it.
+Login is a passkey (WebAuthn, with user verification: Touch ID, Windows Hello, a security key...) or, when email is
+configured, a sign-in link sent by email. To add the first passkey, open the page, expand "Add a key" and enter
+`RELAY_API_TOKEN` once (it registers the passkey for the first owner). Once signed in, any member adds passkeys for
+themselves from the account sheet, without the token. `RELAY_PASSKEY_REGISTRATION=off` closes registration for
+everyone. Sessions last 12 hours and use a `__Host-` cookie (Secure, HttpOnly, SameSite=Strict). The dashboard needs
+`RELAY_BASE_URL` on https; set `RELAY_UI=off` to disable it.
+
+### Team
+
+Invite people by email and give each a role:
+
+| Role | Dashboard | OAuth apps they approve | Team |
+| --- | --- | --- | --- |
+| `owner` | everything | full access or drafts only | manage everyone, make owners |
+| `admin` | everything | full access or drafts only | manage admins, editors, viewers |
+| `editor` | everything (read) | drafts only, like `RELAY_DRAFT_TOKEN`: create and edit drafts, never publish, approve or connect accounts | |
+| `viewer` | everything (read) | cannot approve apps | |
+
+1. Set `RELAY_RESEND_API_KEY` and `RELAY_EMAIL_FROM` (a domain verified in Resend), and `RELAY_OWNER_EMAIL`.
+2. Owners and admins invite from the **Team** sheet (email + role), or with `invite_member`. The invitee gets a
+   link (7 days, single use) to `/ui/accept`, sets a name and is signed in.
+3. Members then sign in with **Email me a link** on the login page (15 minutes, single use), and can add a passkey
+   from the account sheet. The Team sheet changes roles, removes members, resends or cancels invitations.
+
+Rules and protections:
+
+- The last active owner can be neither removed, disabled nor demoted. Only an owner can change an owner or make one.
+- The role is checked on every request. A demoted member's OAuth apps are capped at once (an editor's apps are drafts
+  only, a viewer's stop working); removing or disabling a member signs them out and disconnects their apps.
+- Asking for a sign-in link always gets the same answer, member or not, and is rate limited per address (3 per
+  15 minutes) and per client (10 per 15 minutes). The link page only signs in when you press the button, so mail
+  scanners that open links cannot use them.
+- Links and codes are random, single use, stored as SHA-256 only, and never logged. Emails are short HTML + text,
+  in English or French, with no images or tracking pixels, and never contain the API token. Resend's own click
+  tracking, if enabled on the sending domain, rewrites links: keep it off for the Relay sender.
+- Member changes, invitations and logins (with the method) are logged and kept in the `audit_log` table.
+
+Upgrading from a single-owner instance: on start, existing passkeys, open sessions and OAuth apps are attached to a
+new `owner` member (with `RELAY_OWNER_EMAIL` as its email, if set; else set it later with `update_member`).
+Existing passkeys keep working. Without email configured, the Team sheet still lists members and changes roles.
 
 ## Use it from an agent (MCP)
 
@@ -157,19 +195,23 @@ Tools:
 - Conversations: `list_comments`, `reply_comment`
 - Browser agent: `create_browser_task`, `list_browser_tasks`
 - Connected apps (admin): `list_oauth_grants`, `revoke_oauth_grant`
+- Team (admin): `list_members`, `invite_member`, `update_member` (role, disabled, email, name; `action: resend|revoke`
+  for a pending invitation), `remove_member`. Called through an OAuth app, they act as the member who approved it
 
 ### Connect an agent with OAuth
 
 Agents that support MCP authorization (claude.ai, Claude Desktop, Claude Code, ChatGPT...) connect with the URL
-alone: you approve them with the passkey of the dashboard, no token to copy.
+alone: a dashboard member approves them, no token to copy.
 
 - **claude.ai / Claude Desktop**: Settings → Connectors → Add custom connector → URL `https://<your-host>/mcp`.
 - **Claude Code**: `claude mcp add --transport http relay https://<your-host>/mcp`, then `/mcp` → relay → Authenticate.
 
-The app opens `https://<your-host>/oauth/authorize`. Sign in with your passkey if needed, pick **Full access**
+The app opens `https://<your-host>/oauth/authorize`. Sign in (passkey or email link) if needed, pick **Full access**
 (`relay:admin`) or **Drafts only** (`relay:drafts`, the same rights as `RELAY_DRAFT_TOKEN`), then **Approve**:
-every approval asks for the passkey again (with PIN or biometrics), even inside a dashboard session. You need a
-passkey first (see [Dashboard](#dashboard)). Revoke an app from the dashboard's Apps sheet, with
+every approval asks for a fresh check, even inside a dashboard session: your passkey again (with PIN or
+biometrics), or, if you have no passkey, a 6-digit code sent to your email (10 minutes, 5 attempts, single use).
+Your role caps the choice (editors: drafts only; viewers cannot approve), and the Apps sheet shows who approved
+each app. Revoke an app from the Apps sheet (owners and admins: any app; others: their own), with
 `revoke_oauth_grant` or `DELETE /v1/oauth/grants/{id}`.
 
 How it works (MCP authorization spec 2025-06-18 and later):
@@ -279,6 +321,8 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | GET | `/v1/accounts/growth` | `account_growth` |
 | GET / DELETE | `/v1/oauth/grants`, `/v1/oauth/grants/{id}` | `list_oauth_grants` / `revoke_oauth_grant` |
 | POST | `/v1/query` | `sql_query` |
+| GET / POST | `/v1/members` | `list_members` / `invite_member` |
+| PATCH / DELETE | `/v1/members/{id}` | `update_member` / `remove_member` (an `inv_` id revokes the invitation) |
 | POST | `/v1/posts/validate` | `validate_post` |
 | POST | `/v1/posts/{id}/approve` | `approve_post` |
 | GET / POST | `/v1/media` | list / upload (multipart `file` or JSON `{"url"}`) |
