@@ -42,6 +42,13 @@ func percentEncode(s string) string {
 // Header computes the Authorization header. extra holds form-encoded body params (only for
 // application/x-www-form-urlencoded bodies); JSON and multipart bodies are not signed.
 func (o *OAuth1) Header(method, rawURL string, extra url.Values) string {
+	return o.HeaderWith(method, rawURL, extra, nil)
+}
+
+// HeaderWith is Header with extra oauth_* protocol parameters, signed and sent in the header: oauth_callback
+// for a request token, oauth_verifier for an access token (3-legged flow). Without Token (request token step)
+// there is no oauth_token parameter and the signing key ends with "&".
+func (o *OAuth1) HeaderWith(method, rawURL string, extra url.Values, protocol map[string]string) string {
 	now := time.Now
 	if o.now != nil {
 		now = o.now
@@ -59,8 +66,13 @@ func (o *OAuth1) Header(method, rawURL string, extra url.Values) string {
 		"oauth_nonce":            nonce(),
 		"oauth_signature_method": "HMAC-SHA1",
 		"oauth_timestamp":        strconv.FormatInt(now().Unix(), 10),
-		"oauth_token":            o.Token,
 		"oauth_version":          "1.0",
+	}
+	if o.Token != "" {
+		oauth["oauth_token"] = o.Token
+	}
+	for k, v := range protocol {
+		oauth[k] = v
 	}
 	u, _ := url.Parse(rawURL)
 	type kv struct{ k, v string }

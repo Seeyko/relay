@@ -1,6 +1,6 @@
 "use strict";
 // Relay dashboard: passkey or email login, a read-only calendar, the drafts list, a full post preview, the
-// connected apps and the team.
+// connected apps, the team and the social accounts (connect / reconnect with each network).
 // Every value from the API is rendered with textContent (never innerHTML).
 
 const $ = (id) => document.getElementById(id);
@@ -21,7 +21,9 @@ const T = FR
       join: "Rejoindre", name: "Votre nom", continue: "Continuer", badLink: "Lien invalide ou expiré.",
       team: "Équipe", invite: "Inviter", invited: "Invité", resend: "Renvoyer", cancel: "Annuler", remove: "Retirer",
       addPasskey: "Ajouter une passkey", signOut: "Se déconnecter", by: "par", noEmail: "Email non configuré",
-      roles: { owner: "Propriétaire", admin: "Admin", editor: "Éditeur", viewer: "Lecteur" }, save: "OK" }
+      roles: { owner: "Propriétaire", admin: "Admin", editor: "Éditeur", viewer: "Lecteur" }, save: "OK",
+      accounts: "Comptes", reconnect: "Reconnecter", connectNet: "Connecter un réseau", noAccounts: "Aucun compte",
+      redirects: "URI de redirection", noNetworks: "Aucune connexion réseau configurée" }
   : { signIn: "Sign in", addKey: "Add a key", token: "API token", create: "Create", week: "Week", day: "Day",
       empty: "Nothing planned", cancelled: "Cancelled.", failed: "Failed", unsupported: "This browser doesn't support passkeys.",
       added: "Key added.", dup: "This key already exists.", open: "Open",
@@ -37,7 +39,9 @@ const T = FR
       join: "Join", name: "Your name", continue: "Continue", badLink: "This link is invalid or expired.",
       team: "Team", invite: "Invite", invited: "Invited", resend: "Resend", cancel: "Cancel", remove: "Remove",
       addPasskey: "Add a passkey", signOut: "Sign out", by: "by", noEmail: "Email not configured",
-      roles: { owner: "Owner", admin: "Admin", editor: "Editor", viewer: "Viewer" }, save: "OK" };
+      roles: { owner: "Owner", admin: "Admin", editor: "Editor", viewer: "Viewer" }, save: "OK",
+      accounts: "Accounts", reconnect: "Reconnect", connectNet: "Connect a network", noAccounts: "No accounts",
+      redirects: "Redirect URIs", noNetworks: "No network sign-in configured" };
 const NET_NAMES = { x: "X", instagram: "Instagram", facebook: "Facebook", threads: "Threads", "linkedin-page": "LinkedIn",
   youtube: "YouTube", tiktok: "TikTok", website: "Website" };
 
@@ -62,6 +66,7 @@ const SHARE_ICON = "M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a
 const SAVE_ICON = "M6 3h12v18l-6-4-6 4z";
 const TEAM_ICON = "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8";
 const ME_ICON = "M20 21v-1a5 5 0 0 0-5-5H9a5 5 0 0 0-5 5v1M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z";
+const LINK_ICON = "M10 14a5 5 0 0 0 7.1 0l3-3a5 5 0 0 0-7.1-7.1l-1.5 1.5M14 10a5 5 0 0 0-7.1 0l-3 3a5 5 0 0 0 7.1 7.1l1.5-1.5";
 const APPS_ICON = "M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0zM12 16v5";
 const WARN_ICON = "M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z";
 
@@ -141,7 +146,7 @@ async function login() {
       response: { authenticatorData: bufToB64u(r.authenticatorData), clientDataJSON: bufToB64u(r.clientDataJSON),
         signature: bufToB64u(r.signature), userHandle: r.userHandle ? bufToB64u(r.userHandle) : "" },
     } });
-    showApp();
+    afterLogin();
   } catch (e) {
     say(e.name === "NotAllowedError" ? T.cancelled : `${T.failed}: ${e.message}`, e.name !== "NotAllowedError");
   }
@@ -871,6 +876,71 @@ async function openTeam() {
   holder.replaceChildren(...parts);
 }
 
+// ---------- accounts: connect and reconnect with each network ----------
+
+async function startConnection(body) {
+  const r = await api("accounts/connect", { method: "POST", body });
+  location.assign(r.url);
+}
+
+async function openAccounts() {
+  const holder = openSheet(T.accounts);
+  holder.append(el("div", "pv-loading"));
+  let data;
+  try { data = await api("accounts"); }
+  catch (e) {
+    if (e.status === 401) { $("preview").close(); return showLogin(); }
+    return holder.replaceChildren(el("p", "pv-err", `${T.load}: ${e.message}`));
+  }
+  const parts = [];
+  if (!data.accounts.length) parts.push(el("p", "empty", T.noAccounts));
+  else {
+    const list = el("div", "apps");
+    for (const a of data.accounts) {
+      const row = el("div", "app-row");
+      const pic = el("span", "acc-pic");
+      pic.style.color = netColor(a);
+      if (a.avatar) { const img = el("img"); img.src = a.avatar; img.alt = ""; pic.append(img); }
+      const badge = el("span", "acc-net"); badge.style.color = netColor(a); badge.append(netIcon(a));
+      pic.append(badge);
+      const info = el("div", "app-info");
+      info.append(el("b", "", a.name || a.handle || a.id),
+        el("span", "app-meta", [a.handle ? "@" + a.handle.replace(/^@/, "") : "", NET_NAMES[a.provider] || a.provider].filter(Boolean).join(" · ")));
+      row.append(pic, info);
+      if (a.reconnect) row.append(smallBtn(T.reconnect, "plain", () => startConnection({ account_id: a.id })));
+      list.append(row);
+    }
+    parts.push(list);
+  }
+  if (!data.networks.length) {
+    parts.push(el("p", "app-meta pad", T.noNetworks));
+  } else {
+    parts.push(el("div", "sheet-label", T.connectNet));
+    const nets = el("div", "net-btns");
+    for (const n of data.networks) {
+      const b = el("button", "net-btn"); b.type = "button";
+      const ic = netIcon({ provider: n.connector }); ic.style.color = netColor({ provider: n.connector });
+      b.append(ic, document.createTextNode(n.label));
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try { await startConnection({ network: n.slug }); }
+        catch (e) { b.disabled = false; if (e.status === 401) { $("preview").close(); showLogin(); } else alert(e.message); }
+      });
+      nets.append(b);
+    }
+    parts.push(nets);
+    const det = el("details", "redirects");
+    det.append(el("summary", "", T.redirects));
+    for (const n of data.networks) {
+      const r = el("div", "redirect");
+      r.append(el("span", "", n.label), el("code", "", n.redirect_uri));
+      det.append(r);
+    }
+    parts.push(det);
+  }
+  holder.replaceChildren(...parts);
+}
+
 // ---------- navigation ----------
 
 function step(n) {
@@ -882,6 +952,17 @@ function goToday() { state.day = startOfDay(new Date()); load(); }
 function showLogin() { $("app").hidden = true; $("login").hidden = false; }
 
 function showApp() { $("login").hidden = true; $("app").hidden = false; load(); loadDrafts(); }
+
+// After a sign-in, the header buttons follow the member's role.
+async function afterLogin() {
+  showApp();
+  try {
+    const me = state.me = await api("me");
+    $("apps-btn").hidden = !me.apps;
+    $("team-btn").hidden = !me.team;
+    $("accounts-btn").hidden = !me.accounts;
+  } catch { /* keep */ }
+}
 
 document.addEventListener("DOMContentLoaded", async () => {
   const signIn = $("login-btn");
@@ -903,6 +984,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("me-btn").addEventListener("click", openMe);
   $("team-btn").append(svg(TEAM_ICON));
   $("team-btn").addEventListener("click", openTeam);
+  $("accounts-btn").append(svg(LINK_ICON));
+  $("accounts-btn").addEventListener("click", openAccounts);
   $("apps-btn").append(svg(APPS_ICON));
   $("apps-btn").addEventListener("click", openApps);
   $("prev").addEventListener("click", () => step(-1));
@@ -947,7 +1030,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     const me = state.me = await api("me");
     $("apps-btn").hidden = !me.apps;
     $("team-btn").hidden = !me.team;
-    if (me.logged_in) return showApp();
+    $("accounts-btn").hidden = !me.accounts;
+    if (me.logged_in) {
+      showApp();
+      // Back from a network sign-in (/connect/...): show the accounts.
+      if (location.hash === "#accounts" && me.accounts) { history.replaceState(null, "", location.pathname); openAccounts(); }
+      return;
+    }
     $("email-form").hidden = !me.email;
     // No passkey yet: with email on, members sign in by email; the API token form stays folded.
     if (!me.has_passkeys && me.email) $("login-btn").hidden = true;

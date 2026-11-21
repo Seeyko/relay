@@ -106,6 +106,7 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_WEBHOOK_URL` / `RELAY_WEBHOOK_SECRET` | | Webhook target and HMAC secret |
 | `RELAY_AGENT_INSTRUCTIONS` | | Extra instructions sent to MCP clients (timezone, tone, languages...) |
 | `X_CONSUMER_KEY`, `X_CONSUMER_SECRET`, `X_ACCESS_TOKEN`, `X_ACCESS_TOKEN_SECRET` | | Optional X bootstrap |
+| `RELAY_THREADS_APP_ID`/`_SECRET`, `RELAY_META_APP_ID`/`_SECRET`, `RELAY_INSTAGRAM_APP_ID`/`_SECRET`, `RELAY_LINKEDIN_CLIENT_ID`/`_SECRET`, `RELAY_YOUTUBE_CLIENT_ID`/`_SECRET`, `RELAY_TIKTOK_CLIENT_KEY`/`_SECRET`, `RELAY_X_CONSUMER_KEY`/`_SECRET` | | App credentials for "Connect with ..." sign-ins (see [Connect accounts](#connect-accounts-with-each-networks-sign-in)) |
 
 ## Deploy
 
@@ -134,7 +135,8 @@ A minimal, read-only dashboard at `https://<your-host>/ui/`, for you and your [t
   `RELAY_TIMEZONE`, the status and errors, and the provider's pre-flight problems, run server-side.
 
 It cannot publish, approve or edit anything: approve drafts with `approve_post` (or `POST /v1/posts/{id}/approve`).
-What it changes: the **Apps** sheet (header button) lists the agents connected with OAuth (name, access, who
+What it changes: the **Accounts** sheet connects and reconnects social accounts (see
+[Connect accounts](#connect-accounts-with-each-networks-sign-in)), the **Apps** sheet (header button) lists the agents connected with OAuth (name, access, who
 approved, date, last use) and revokes them; the **Team** sheet manages members.
 Media are served through Relay at `/media/`, so previews work with a private bucket.
 
@@ -178,6 +180,48 @@ Rules and protections:
 Upgrading from a single-owner instance: on start, existing passkeys, open sessions and OAuth apps are attached to a
 new `owner` member (with `RELAY_OWNER_EMAIL` as its email, if set; else set it later with `update_member`).
 Existing passkeys keep working. Without email configured, the Team sheet still lists members and changes roles.
+
+## Connect accounts with each network's sign-in
+
+Instead of pasting tokens, owners and admins connect an account with the network's own consent screen, and
+**reconnect** it in one click when a token expires or the app gets a new permission (a token refresh keeps the
+permissions of the first consent, so a new permission needs a new consent).
+
+- **Dashboard**: the **Accounts** sheet (link icon in the header, owners and admins only) lists the accounts with a
+  **Reconnect** button, and a "Connect a network" button per configured network. It also lists the redirect URIs.
+- **Agents**: `start_account_connection` (admin keys) with `network`, or `account_id` to reconnect, returns a link
+  (single use, 10 minutes) to hand to a human. REST: `POST /v1/accounts/connect` `{"network": "threads"}`,
+  `POST /v1/accounts/{id}/reconnect`.
+- **Reconnect** must sign in the same remote account: another one is refused and nothing changes. The credentials are
+  replaced in place (same checks as `update_account_credentials`), so posts and history stay attached. Connecting an
+  account that is already connected updates it in place too.
+- Facebook, Instagram (Facebook Login) and LinkedIn show a picker when the sign-in gives several Pages, Instagram
+  accounts or organizations.
+
+A network shows up only when its app credentials are set. Register the redirect URI
+`{RELAY_BASE_URL}/connect/{network}/callback` in each developer console:
+
+| Network | Variables | Redirect URI | Where to register it | Scopes requested |
+| --- | --- | --- | --- | --- |
+| `threads` | `RELAY_THREADS_APP_ID`, `RELAY_THREADS_APP_SECRET` | `/connect/threads/callback` | Meta app > Threads API use case > Settings: Redirect Callback URLs | `threads_basic`, `threads_content_publish`, `threads_manage_replies`, `threads_read_replies`, `threads_manage_insights`, `threads_delete` (then a 60-day long-lived token) |
+| `facebook` | `RELAY_META_APP_ID`, `RELAY_META_APP_SECRET` | `/connect/facebook/callback` | Meta app > Facebook Login for Business > Settings: Valid OAuth Redirect URIs | `pages_show_list`, `pages_manage_posts`, `pages_read_engagement`, `pages_read_user_content`, `pages_manage_engagement`, `read_insights`, `business_management` (Page tokens from a long-lived user token: they do not expire) |
+| `instagram` (via Facebook) | `RELAY_META_APP_ID`, `RELAY_META_APP_SECRET` | `/connect/instagram/callback` | same Meta app, same setting | `instagram_basic`, `instagram_content_publish`, `instagram_manage_comments`, `instagram_manage_insights`, `pages_show_list`, `pages_read_engagement`, `business_management` |
+| `instagram-login` | `RELAY_INSTAGRAM_APP_ID`, `RELAY_INSTAGRAM_APP_SECRET` (optional) | `/connect/instagram-login/callback` | Meta app > Instagram > API setup with Instagram login > Business login settings | `instagram_business_basic`, `instagram_business_content_publish`, `instagram_business_manage_comments`, `instagram_business_manage_insights` (then a 60-day long-lived token) |
+| `linkedin` | `RELAY_LINKEDIN_CLIENT_ID`, `RELAY_LINKEDIN_CLIENT_SECRET` | `/connect/linkedin/callback` | LinkedIn developer portal > Auth: Authorized redirect URLs | `r_organization_social`, `w_organization_social`, `rw_organization_admin` (Community Management API; `r_organization_admin` belongs to the Advertising API) |
+| `youtube` | `RELAY_YOUTUBE_CLIENT_ID`, `RELAY_YOUTUBE_CLIENT_SECRET` | `/connect/youtube/callback` | Google Cloud > Credentials > OAuth client (Web application): Authorized redirect URIs | `youtube.upload`, `youtube.readonly`, `youtube.force-ssl`, `yt-analytics.readonly` (`access_type=offline`, `prompt=consent`, PKCE) |
+| `tiktok` | `RELAY_TIKTOK_CLIENT_KEY`, `RELAY_TIKTOK_CLIENT_SECRET` | `/connect/tiktok/callback` | TikTok for Developers > Login Kit: Redirect URI (Web) | `user.info.basic`, `user.info.profile`, `user.info.stats`, `video.publish`, `video.list` |
+| `x` | `RELAY_X_CONSUMER_KEY`, `RELAY_X_CONSUMER_SECRET` | `/connect/x/callback` | X developer portal > User authentication settings: Callback URI (Read and write) | OAuth 1.0a three-legged (app permissions decide the access) |
+
+Override a scope list with `RELAY_CONNECT_<NETWORK>_SCOPES` (e.g. `RELAY_CONNECT_LINKEDIN_SCOPES`, comma or space
+separated). PKCE is used where the network documents it for web apps (Google); Meta, LinkedIn and TikTok document
+it only for other flows or native apps. Instagram accounts connected with Facebook Login reconnect through
+`instagram`, the others through `instagram-login`.
+
+Security: the start link and the network's `state` are random, single use and expire after 10 minutes. The state is
+bound to the browser that started the sign-in (an HttpOnly, SameSite=Lax cookie) and to the member who asked, who
+must still be an owner or admin when the network answers. A link handed out by an agent shows a **Continue** button
+(a same-origin POST), so chat link previews cannot use it. Tokens never appear in URLs shown to people, in pages or in
+logs; pending sign-ins live in memory (a restart cancels them).
 
 ## Use it from an agent (MCP)
 
@@ -327,6 +371,7 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | GET / DELETE | `/v1/oauth/grants`, `/v1/oauth/grants/{id}` | `list_oauth_grants` / `revoke_oauth_grant` |
 | POST | `/v1/query` | `sql_query` |
 | GET / POST | `/v1/members` | `list_members` / `invite_member` |
+| POST | `/v1/accounts/connect`, `/v1/accounts/{id}/reconnect` | `start_account_connection` |
 | PATCH / DELETE | `/v1/members/{id}` | `update_member` / `remove_member` (an `inv_` id revokes the invitation) |
 | POST | `/v1/posts/validate` | `validate_post` |
 | POST | `/v1/posts/{id}/approve` | `approve_post` |

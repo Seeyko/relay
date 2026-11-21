@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Seeyko/relay/internal/blob"
+	"github.com/Seeyko/relay/internal/connect"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/mcp"
 	"github.com/Seeyko/relay/internal/oauth"
@@ -35,6 +36,8 @@ type API struct {
 	UI *ui.UI
 	// OAuth (optional) lets agents connect to /mcp with OAuth 2.1, approved with the dashboard passkey.
 	OAuth *oauth.Server
+	// Connect (optional) runs "Connect with <network>" sign-ins under /connect/.
+	Connect *connect.Manager
 }
 
 func (a *API) Handler() http.Handler {
@@ -67,6 +70,14 @@ func (a *API) Handler() http.Handler {
 	if a.OAuth != nil {
 		a.OAuth.Register(mux)
 	}
+	mux.HandleFunc("/connect/", http.NotFound)
+	if a.Connect != nil {
+		var session connect.SessionFunc
+		if a.UI != nil {
+			session = a.UI.SessionUserID
+		}
+		a.Connect.Register(mux, session)
+	}
 
 	authed := http.NewServeMux()
 	authed.Handle("POST /mcp", a.MCP)
@@ -89,6 +100,8 @@ func (a *API) Handler() http.Handler {
 	})
 	authed.HandleFunc("POST /v1/accounts/{id}/import", a.tool("import_history", map[string]string{"id": "account_id"}))
 	// Profile pictures: {"media": "<id>"} or {"media_url": "https://..."}, or {"clear": true}.
+	authed.HandleFunc("POST /v1/accounts/connect", a.tool("start_account_connection", nil))
+	authed.HandleFunc("POST /v1/accounts/{id}/reconnect", a.tool("start_account_connection", map[string]string{"id": "account_id"}))
 	authed.HandleFunc("PATCH /v1/accounts/{id}/credentials", a.tool("update_account_credentials", map[string]string{"id": "account_id"}))
 	authed.HandleFunc("PUT /v1/accounts/{id}/avatar", a.tool("set_account_avatar", map[string]string{"id": "account_id"}))
 	authed.HandleFunc("PUT /v1/accounts/avatar", a.toolWith("set_account_avatar", nil, map[string]any{"account_id": "all"}))
@@ -339,6 +352,7 @@ func (a *API) call(w http.ResponseWriter, r *http.Request, name string, args []b
 
 func (a *API) fail(w http.ResponseWriter, err error) {
 	var inv *core.ErrInvalid
+	var cinv *connect.ErrInvalid
 	var denied *team.ErrDenied
 	var bad *team.ErrBadInput
 	var site *website.SiteError
@@ -355,7 +369,7 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 		writeJSON(w, 403, map[string]string{"error": err.Error()})
 	case errors.Is(err, mcp.ErrUnknownTool):
 		writeJSON(w, 404, map[string]string{"error": err.Error()})
-	case errors.As(err, &inv):
+	case errors.As(err, &inv), errors.As(err, &cinv):
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 	case errors.As(err, &site):
 		// The site's own refusals keep their meaning; its auth errors are Relay's 502 (the account's token).

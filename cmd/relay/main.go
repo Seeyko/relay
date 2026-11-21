@@ -15,6 +15,7 @@ import (
 
 	"github.com/Seeyko/relay/internal/api"
 	"github.com/Seeyko/relay/internal/blob"
+	"github.com/Seeyko/relay/internal/connect"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/email"
 	"github.com/Seeyko/relay/internal/mcp"
@@ -158,13 +159,28 @@ func run(log *slog.Logger) error {
 	if tm != nil {
 		tools = append(tools, mcp.TeamTools(tm)...)
 	}
+	// "Connect with <network>" sign-ins, for the networks whose app credentials are set.
+	var conn *connect.Manager
+	if svc.BaseURL != "" {
+		nets := connect.FromEnv(os.Getenv)
+		conn, err = connect.New(svc.BaseURL, svc, nets, log)
+		if err != nil {
+			log.Warn("network sign-in disabled", "err", err)
+			conn = nil
+		} else {
+			for _, n := range nets {
+				log.Info("network sign-in on", "network", n.Slug, "redirect_uri", conn.RedirectURI(n))
+			}
+			tools = append(tools, mcp.ConnectTools(conn)...)
+		}
+	}
 	server := mcp.NewServer("relay", version, tools)
 	server.ExtraInstructions = os.Getenv("RELAY_AGENT_INSTRUCTIONS")
 	draft := os.Getenv("RELAY_DRAFT_TOKEN")
 	if draft != "" && (len(draft) < 16 || draft == token) {
 		return errors.New("RELAY_DRAFT_TOKEN must be at least 16 characters and differ from RELAY_API_TOKEN")
 	}
-	a := &api.API{Svc: svc, MCP: server, Token: token, DraftToken: draft, Log: log, Version: version}
+	a := &api.API{Svc: svc, MCP: server, Token: token, DraftToken: draft, Log: log, Version: version, Connect: conn}
 	if uiOn {
 		dash, err := ui.New(svc.BaseURL, st, token, log)
 		if err != nil {
@@ -173,6 +189,7 @@ func run(log *slog.Logger) error {
 			dash.RegistrationClosed = os.Getenv("RELAY_PASSKEY_REGISTRATION") == "off"
 			dash.Svc = svc
 			dash.Team = tm
+			dash.Connect = conn
 			a.UI = dash
 			if os.Getenv("RELAY_OAUTH") != "off" {
 				authz, err := oauth.New(svc.BaseURL, st, dash, log)

@@ -1,0 +1,12 @@
+/* Connection pages: reuse the dashboard's login styles (/ui/style.css). */
+.connect .mark { margin-bottom: 6px; }
+.connect .title { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; text-align: center; overflow-wrap: anywhere; max-width: 340px; }
+.connect .who { margin: -4px 0 6px; color: var(--muted); overflow-wrap: anywhere; text-align: center; }
+.connect .msg { max-width: 340px; }
+.connect a.primary { text-decoration: none; }
+.pick { display: flex; flex-direction: column; align-items: center; gap: 16px; width: min(360px, 100%); }
+.choices { display: flex; flex-direction: column; width: 100%; background: var(--surface); border: 1px solid var(--faint); border-radius: var(--r); overflow: hidden; }
+.choice { display: flex; align-items: center; gap: 12px; padding: 13px 16px; cursor: pointer; overflow-wrap: anywhere; }
+.choice + .choice { border-top: 1px solid var(--faint); }
+.choice:hover { background: var(--hover); }
+.choice input { accent-color: var(--accent); width: 18px; height: 18px; margin: 0; flex: none; }

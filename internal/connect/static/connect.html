@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="same-origin">
+<meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111110" media="(prefers-color-scheme: dark)">
+<title>{{if .Title}}{{.Title}} · {{end}}Relay</title>
+<link rel="stylesheet" href="/ui/style.css">
+<link rel="stylesheet" href="/connect/static/connect.css">
+</head>
+<body>
+<main class="login connect">
+  <div class="mark" aria-hidden="true"></div>
+{{- if .Title}}
+  <h1 class="title">{{.Title}}</h1>
+{{- end}}
+{{- if .Error}}
+  <p class="msg err">{{.Error}}</p>
+  <a class="link" href="/ui/#accounts">Back to Relay</a>
+{{- else if .Done}}
+  <p class="who">{{.Message}}</p>
+  <a class="primary" href="/ui/#accounts">Open Relay</a>
+{{- else if .PickID}}
+  <form class="pick" method="post" action="{{.Action}}">
+    <input type="hidden" name="pick" value="{{.PickID}}">
+    <div class="choices">
+{{- range .Cands}}
+      <label class="choice"><input type="radio" name="choice" value="{{.Index}}" required><span>{{.Label}}</span></label>
+{{- end}}
+    </div>
+    <button class="primary" type="submit">Connect</button>
+  </form>
+{{- else}}
+  <p class="msg">{{.Message}}</p>
+  <form method="post" action="{{.Action}}">
+    <input type="hidden" name="t" value="{{.Token}}">
+    <button class="primary" type="submit">Continue</button>
+  </form>
+  <a class="link" href="/ui/">Cancel</a>
+{{- end}}
+</main>
+</body>
+</html>

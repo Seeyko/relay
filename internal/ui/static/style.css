@@ -116,6 +116,22 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .app-revoke:disabled { opacity: .5; }
 .app-revoke.plain { color: var(--ink); }
 .app-row.pending b, .app-row.off b { color: var(--muted); font-weight: 500; }
+.acc-pic { position: relative; flex: none; width: 36px; height: 36px; border-radius: 50%; background: var(--faint); display: grid; place-items: center; }
+.acc-pic img { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; }
+.acc-pic img + .acc-net { position: absolute; right: -3px; bottom: -3px; width: 18px; height: 18px; border-radius: 50%; background: var(--surface); box-shadow: 0 0 0 2px var(--surface); }
+.acc-net { display: grid; place-items: center; }
+.acc-net svg { width: 18px; height: 18px; }
+.acc-pic img + .acc-net svg { width: 12px; height: 12px; }
+.sheet-label { font-size: 12px; font-weight: 600; color: var(--muted); padding: 14px 6px 8px; }
+.net-btns { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 8px; }
+.net-btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px 8px 10px; border-radius: 999px; font-size: 14px; font-weight: 600; box-shadow: 0 0 0 1px var(--faint); }
+.net-btn:hover { background: var(--hover); }
+.net-btn:disabled { opacity: .5; }
+.net-btn svg { width: 18px; height: 18px; }
+.redirects { padding: 8px 6px 14px; font-size: 12px; color: var(--muted); }
+.redirects summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.redirect { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; }
+.redirect code { color: var(--ink); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; user-select: all; }
 .sheet-foot { display: flex; justify-content: flex-end; padding: 4px 0 12px; }
 .pad { padding: 0 6px 8px; margin: 0; }
 

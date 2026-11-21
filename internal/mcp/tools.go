@@ -156,7 +156,7 @@ func coreTools(svc *core.Service) []Tool {
 		{
 			Name:        "update_account_credentials",
 			Admin:       true,
-			Description: "Change some credential fields of a connected account (new token after a reconnection, a refresh token...). Other fields are kept; a field set to \"\" is removed. The result is verified with the network and must be the same remote account, so posts and history stay attached.",
+			Description: "Change some credential fields of a connected account (new token after a reconnection, a refresh token...). Other fields are kept; a field set to \"\" is removed. The result is verified with the network and must be the same remote account, so posts and history stay attached. To have a human sign in again with the network instead (new permissions), use start_account_connection.",
 			InputSchema: obj(map[string]any{
 				"account_id":  str(""),
 				"credentials": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Fields to set, as in connect_account"},

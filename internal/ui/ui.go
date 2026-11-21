@@ -10,8 +10,9 @@
 //     hash is stored. Sessions expire after SessionTTL. The member's role is read on every request.
 //   - State-changing calls are JSON POSTs checked against the expected Origin.
 //   - Strict CSP (no inline script), no framing, no caching of API responses.
-//   - Roles: viewers and editors read; owners and admins also manage the team and revoke any app. The dashboard
-//     never publishes, approves, edits or replies.
+//   - Roles: viewers and editors read; owners and admins also manage the team, revoke any app and connect or
+//     reconnect social accounts with each network's sign-in (internal/connect). The dashboard never publishes,
+//     approves, edits or replies.
 package ui
 
 import (
@@ -38,6 +39,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/Seeyko/relay/internal/connect"
 	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/oauth"
 	"github.com/Seeyko/relay/internal/store"
@@ -67,7 +69,9 @@ type UI struct {
 	Apps bool
 	// Team (optional) manages members: the Team sheet, invitations and, when email is configured, sign-in links.
 	Team *team.Team
-	Log  *slog.Logger
+	// Connect (optional) signs accounts in with each network ("Connect" / "Reconnect" in the Accounts sheet).
+	Connect *connect.Manager
+	Log     *slog.Logger
 
 	origin string // e.g. https://relay.example.com
 	wa     *webauthn.WebAuthn
@@ -144,6 +148,7 @@ func (ui *UI) Register(mux *http.ServeMux) {
 	if ui.Team != nil {
 		ui.registerTeam(mux)
 	}
+	ui.registerAccounts(mux)
 }
 
 // ---------- middleware ----------
@@ -333,6 +338,7 @@ func (ui *UI) me(w http.ResponseWriter, r *http.Request) {
 		out["logged_in"] = true
 		out["user"] = meUser{ID: u.ID, Email: u.Email, Name: u.Name, Role: u.Role, Passkeys: u.Passkeys}
 		out["team"] = ui.Team != nil && isAdmin(u)
+		out["accounts"] = isAdmin(u)
 	}
 	writeJSON(w, 200, out)
 }
