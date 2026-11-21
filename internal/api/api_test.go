@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/Seeyko/relay/internal/store"
 
 	_ "github.com/Seeyko/relay/internal/providers/meta"
+	_ "github.com/Seeyko/relay/internal/providers/threads"
 	_ "github.com/Seeyko/relay/internal/providers/tiktok"
 	_ "github.com/Seeyko/relay/internal/providers/website"
 	_ "github.com/Seeyko/relay/internal/providers/x"
@@ -451,5 +453,91 @@ func TestMetaProviders(t *testing.T) {
 	want := "container:https://relay.example/media/" + m.ID + ".jpg"
 	if len(igSteps) != 2 || igSteps[0] != want || igSteps[1] != "publish:cont1" {
 		t.Fatalf("ig steps: %v", igSteps)
+	}
+}
+
+func TestThreadsProvider(t *testing.T) {
+	e := newEnv(t)
+	var mu sync.Mutex
+	var steps []string
+	n := 0
+	th := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		if r.FormValue("access_token") == "" {
+			t.Errorf("no token on %s", r.URL.Path)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		p := r.URL.Path
+		switch {
+		case p == "/v1.0/me":
+			w.Write([]byte(`{"id":"th1","username":"rmp","name":"RideMyPark"}`))
+		case p == "/v1.0/th1/threads" && r.Method == "POST":
+			n++
+			steps = append(steps, fmt.Sprintf("create:%s:%s:%s:%s", r.FormValue("media_type"), r.FormValue("image_url"), r.FormValue("reply_to_id"), r.FormValue("text")))
+			fmt.Fprintf(w, `{"id":"c%d"}`, n)
+		case strings.HasPrefix(p, "/v1.0/c"):
+			w.Write([]byte(`{"status":"FINISHED"}`))
+		case p == "/v1.0/th1/threads_publish":
+			id := "p" + strings.TrimPrefix(r.FormValue("creation_id"), "c")
+			steps = append(steps, "publish:"+id)
+			fmt.Fprintf(w, `{"id":"%s"}`, id)
+		case p == "/v1.0/p1" && r.URL.Query().Get("fields") == "permalink":
+			w.Write([]byte(`{"permalink":"https://www.threads.net/@rmp/post/one"}`))
+		case p == "/v1.0/p3" && r.URL.Query().Get("fields") == "permalink":
+			w.Write([]byte(`{"permalink":"https://www.threads.net/@rmp/post/three"}`))
+		case p == "/v1.0/p1/conversation":
+			w.Write([]byte(`{"data":[{"id":"r1","text":"top","username":"ann"},{"id":"p2","text":"part two","username":"rmp","is_reply_owned_by_me":true}]}`))
+		case p == "/v1.0/p1/insights":
+			w.Write([]byte(`{"data":[{"name":"views","values":[{"value":100}]},{"name":"likes","values":[{"value":9}]},{"name":"reposts","values":[{"value":2}]}]}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, p)
+			w.WriteHeader(404)
+		}
+	}))
+	defer th.Close()
+	ctx := context.Background()
+
+	acc, err := e.svc.ConnectAccount(ctx, "threads", "", map[string]string{"access_token": "tok", "base_url": th.URL, "token_refreshed_at": time.Now().Format(time.RFC3339)})
+	if err != nil || acc.Handle != "rmp" || acc.RemoteUserID != "th1" {
+		t.Fatalf("connect: %v %+v", err, acc)
+	}
+	if _, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Text: strings.Repeat("a", 501)}); err == nil || !strings.Contains(err.Error(), "pre-flight") {
+		t.Fatalf("501 characters should be rejected: %v", err)
+	}
+	m, err := e.svc.SaveMedia(ctx, strings.NewReader("img"), "a.jpg", "image/jpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: []string{"one", "two"}, Media: []string{m.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.svc.PublishNow(ctx, ps[0].ID)
+	if err != nil || p.Status != "published" || p.RemoteURL != "https://www.threads.net/@rmp/post/one" || strings.Join(p.RemoteIDs, ",") != "p1,p2" {
+		t.Fatalf("publish: %v %+v", err, p)
+	}
+	img := "https://relay.example/media/" + m.ID + ".jpg"
+	want := []string{"create:IMAGE:" + img + "::one", "publish:p1", "create:TEXT::p1:two", "publish:p2"}
+	if strings.Join(steps, "|") != strings.Join(want, "|") {
+		t.Fatalf("steps:\n%v\nwant\n%v", steps, want)
+	}
+	cs, err := e.svc.RefreshComments(ctx, p.ID)
+	if err != nil || len(cs) != 1 || cs[0].Author != "@ann" {
+		t.Fatalf("comments: %v %+v", err, cs)
+	}
+	res, err := e.svc.ReplyToComment(ctx, acc.ID, "r1", "thanks")
+	if err != nil || res.URL != "https://www.threads.net/@rmp/post/three" {
+		t.Fatalf("reply: %v %+v", err, res)
+	}
+	if steps[len(steps)-2] != "create:TEXT::r1:thanks" {
+		t.Fatalf("reply steps: %v", steps)
+	}
+	if n, err := e.svc.RefreshMetrics(ctx, acc.ID, time.Now().Add(-time.Hour)); err != nil || n != 1 {
+		t.Fatalf("metrics: %d %v", n, err)
+	}
+	got, _ := e.svc.Store.GetPost(ctx, p.ID)
+	if norm := core.Normalize(got.Metrics); norm["views"] != 100 || norm["likes"] != 9 || norm["shares"] != 2 {
+		t.Fatalf("normalized %v", norm)
 	}
 }
