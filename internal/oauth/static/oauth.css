@@ -1,0 +1,9 @@
+/* Consent page: reuses the dashboard's login styles (/ui/style.css). */
+.consent .mark { margin-bottom: 6px; }
+.consent .app { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em; text-align: center; overflow-wrap: anywhere; max-width: 320px; }
+.consent .host { margin: -8px 0 10px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; text-align: center; }
+.ask { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.scopes { display: flex; background: var(--faint); border-radius: 12px; padding: 3px; }
+.scopes button { padding: 8px 16px; border-radius: 9px; font-size: 14px; font-weight: 600; color: var(--muted); }
+.scopes button[aria-checked="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .08); }
+.consent a { color: var(--ink); }

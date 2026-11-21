@@ -74,6 +74,7 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_S3_PUBLIC_URL` | | Public base URL of the bucket (custom domain or r2.dev). Empty: the bucket stays private and Relay serves media at `/media/` |
 | `RELAY_UI` | `on` | `off` disables the read-only dashboard at `/ui/` |
 | `RELAY_PASSKEY_REGISTRATION` | `on` | `off` refuses new passkeys, even with the API token (existing ones keep working) |
+| `RELAY_OAUTH` | `on` | `off` disables OAuth for agents (see [Connect an agent with OAuth](#connect-an-agent-with-oauth)). It is also off when the dashboard is off |
 | `RELAY_DRAFT_TOKEN` | | Optional second key that can only create and edit drafts |
 | `RELAY_WEBHOOK_URL` / `RELAY_WEBHOOK_SECRET` | | Webhook target and HMAC secret |
 | `RELAY_AGENT_INSTRUCTIONS` | | Extra instructions sent to MCP clients (timezone, tone, languages...) |
@@ -105,6 +106,8 @@ A minimal, read-only dashboard at `https://<your-host>/ui/`:
   `RELAY_TIMEZONE`, the status and errors, and the provider's pre-flight problems, run server-side.
 
 It cannot publish, approve or edit anything: approve drafts with `approve_post` (or `POST /v1/posts/{id}/approve`).
+The one thing it changes: the **Apps** sheet (header button) lists the agents connected with OAuth (name, access,
+date, last use) and revokes them.
 Media are served through Relay at `/media/`, so previews work with a private bucket.
 
 Login is passkey-only (WebAuthn, with user verification: Touch ID, Windows Hello, a security key...). To add a
@@ -128,6 +131,45 @@ Tools:
 - Analytics: `analyze`, `post_timeline`, `account_growth`, `refresh_metrics`, `sql_query`
 - Conversations: `list_comments`, `reply_comment`
 - Browser agent: `create_browser_task`, `list_browser_tasks`
+- Connected apps (admin): `list_oauth_grants`, `revoke_oauth_grant`
+
+### Connect an agent with OAuth
+
+Agents that support MCP authorization (claude.ai, Claude Desktop, Claude Code, ChatGPT...) connect with the URL
+alone: you approve them with the passkey of the dashboard, no token to copy.
+
+- **claude.ai / Claude Desktop**: Settings → Connectors → Add custom connector → URL `https://<your-host>/mcp`.
+- **Claude Code**: `claude mcp add --transport http relay https://<your-host>/mcp`, then `/mcp` → relay → Authenticate.
+
+The app opens `https://<your-host>/oauth/authorize`. Sign in with your passkey if needed, pick **Full access**
+(`relay:admin`) or **Drafts only** (`relay:drafts`, the same rights as `RELAY_DRAFT_TOKEN`), then **Approve**:
+every approval asks for the passkey again (with PIN or biometrics), even inside a dashboard session. You need a
+passkey first (see [Dashboard](#dashboard)). Revoke an app from the dashboard's Apps sheet, with
+`revoke_oauth_grant` or `DELETE /v1/oauth/grants/{id}`.
+
+How it works (MCP authorization spec 2025-06-18 and later):
+
+| Endpoint | |
+| --- | --- |
+| `GET /.well-known/oauth-protected-resource` (and `.../mcp`) | protected resource metadata (RFC 9728) |
+| `GET /.well-known/oauth-authorization-server` (and `/.well-known/openid-configuration`) | server metadata (RFC 8414) |
+| `POST /oauth/register` | dynamic client registration (RFC 7591), rate limited, at most 200 apps |
+| `GET /oauth/authorize` | consent page (code flow, PKCE S256 required, `resource` = `https://<your-host>/mcp`) |
+| `POST /oauth/token` | `authorization_code` and `refresh_token` |
+| `POST /oauth/revoke` | revocation (RFC 7009): disconnects the app |
+
+- Clients are public: no secret is issued (`token_endpoint_auth_method: none`). A client that sends a secret
+  anyway (`client_secret_post` or `client_secret_basic`) is identified by its `client_id` and the secret is
+  ignored: PKCE proves the request.
+- Redirect URIs must be https, or http on `127.0.0.1`, `[::1]` or `localhost` (any port at authorization time,
+  RFC 8252). They are matched exactly otherwise.
+- Codes live 60 seconds and work once: a code used twice revokes everything issued from it.
+- Access tokens live 1 hour. Refresh tokens live 30 days, are replaced on every use, and a replaced refresh
+  token used again revokes the whole connection. A connection lasts at most 90 days, then the app asks again.
+- Tokens are opaque and bound to `https://<your-host>/mcp`; Relay stores only their SHA-256. They work on `/mcp`
+  and `/v1`, next to `RELAY_API_TOKEN` and `RELAY_DRAFT_TOKEN`, which keep working.
+- OAuth needs the dashboard (`RELAY_BASE_URL` on https). With `RELAY_UI=off` or `RELAY_OAUTH=off`, the metadata
+  answers 404 and agents use the static tokens.
 
 ### Profile pictures
 
@@ -210,6 +252,7 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | GET | `/v1/analytics` | `analyze` |
 | GET | `/v1/posts/{id}/timeline` | `post_timeline` |
 | GET | `/v1/accounts/growth` | `account_growth` |
+| GET / DELETE | `/v1/oauth/grants`, `/v1/oauth/grants/{id}` | `list_oauth_grants` / `revoke_oauth_grant` |
 | POST | `/v1/query` | `sql_query` |
 | POST | `/v1/posts/validate` | `validate_post` |
 | POST | `/v1/posts/{id}/approve` | `approve_post` |

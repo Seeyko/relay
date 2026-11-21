@@ -104,6 +104,16 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .dc-body .txt { font-size: 14px; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; word-break: break-word; white-space: pre-line; }
 .dc-body .th { width: 56px; height: 56px; border-radius: 10px; object-fit: cover; background: var(--faint); }
 
+/* ---------- connected apps ---------- */
+.apps-title { font-weight: 650; padding-left: 6px; }
+.apps { display: flex; flex-direction: column; gap: 8px; padding: 4px 0 8px; }
+.app-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: var(--r); box-shadow: 0 0 0 1px var(--faint); }
+.app-info { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.app-info b { font-weight: 600; overflow-wrap: anywhere; }
+.app-meta { font-size: 12px; color: var(--muted); }
+.app-revoke { padding: 7px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--danger); box-shadow: 0 0 0 1px var(--faint); }
+.app-revoke:disabled { opacity: .5; }
+
 /* ---------- preview sheet ---------- */
 .sheet { border: 0; padding: 0; margin: auto; width: min(560px, 100%); max-height: min(90dvh, 900px); border-radius: 22px; background: var(--surface); color: var(--ink); box-shadow: 0 24px 60px -20px rgb(0 0 0 / .45); overflow: hidden; }
 .sheet[open] { display: flex; flex-direction: column; animation: pop .18s ease-out; }
