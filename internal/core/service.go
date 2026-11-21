@@ -90,6 +90,65 @@ func (s *Service) ConnectAccount(ctx context.Context, provider, name string, cre
 	return acc, nil
 }
 
+// UpdateCredentials changes some credential fields of an existing account (a new token after a
+// reconnection, a refresh token handed over from another tool...). The merged credentials are verified
+// with the network and must still identify the same remote account, so posts and history stay attached.
+// Fields set to "" are removed.
+func (s *Service) UpdateCredentials(ctx context.Context, accountID string, fields map[string]string) (*store.Account, error) {
+	if len(fields) == 0 {
+		return nil, invalid("credentials: give at least one field")
+	}
+	acc, err := s.Store.GetAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	f, err := providers.Get(acc.Provider)
+	if err != nil {
+		return nil, err
+	}
+	creds := map[string]string{}
+	if err := s.Box.OpenJSON(acc.Credentials, &creds); err != nil {
+		return nil, fmt.Errorf("decrypt credentials of %s: %w (did RELAY_ENCRYPTION_KEY change?)", acc.ID, err)
+	}
+	for k, v := range fields {
+		if v == "" {
+			delete(creds, k)
+		} else {
+			creds[k] = v
+		}
+	}
+	// Derived state from the old token must not survive it.
+	for _, k := range []string{"expires_at", "token_expires_at", "token_refreshed_at", "refresh_expires_at"} {
+		if _, given := fields[k]; !given {
+			delete(creds, k)
+		}
+	}
+	saved := creds
+	persist := func(updated map[string]string) error { saved = updated; return nil }
+	cl, err := f.New(creds, persist, s.HTTP)
+	if err != nil {
+		return nil, invalid("%v", err)
+	}
+	id, err := cl.Identify(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not verify credentials with %s: %w", acc.Provider, err)
+	}
+	if acc.RemoteUserID != "" && id.RemoteUserID != acc.RemoteUserID {
+		return nil, invalid("these credentials belong to %s (%s), not to this account (%s): connect it as a new account", id.Handle, id.RemoteUserID, acc.RemoteUserID)
+	}
+	saved["user_id"], saved["username"] = id.RemoteUserID, id.Handle
+	sealed, err := s.Box.SealJSON(saved)
+	if err != nil {
+		return nil, err
+	}
+	acc.Credentials, acc.Handle = sealed, id.Handle
+	if err := s.Store.UpdateAccount(ctx, acc); err != nil {
+		return nil, err
+	}
+	s.Log.Info("account credentials updated", "account", acc.ID, "provider", acc.Provider, "fields", len(fields))
+	return acc, nil
+}
+
 func (s *Service) client(ctx context.Context, acc *store.Account) (providers.Client, error) {
 	f, err := providers.Get(acc.Provider)
 	if err != nil {
