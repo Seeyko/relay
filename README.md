@@ -23,12 +23,13 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 | `x` | text, threads, images, videos | public + impressions (< 30 days) | read + reply | OAuth 1.0a user keys |
 | `facebook` | text, link, photos, video, Reels (Pages) | reactions, comments, shares | read + reply | `page_id`, `page_access_token` |
 | `instagram` | image, carousel (up to 20), Reels, stories | likes, comments, views, reach, saves, shares | read + reply | `access_token` (Instagram Login, auto-refreshed) |
+| `threads` | text (500), image, video, carousel (2-20), threads (reply chains), replies, quotes, link attachment | views, likes, replies, reposts, quotes, shares; followers | read + reply | `access_token` (long-lived, auto-refreshed), optional `user_id` |
 | `youtube` | videos and Shorts (resumable upload) | views, likes, comments (+ YouTube Analytics) | read + reply | `client_id`, `client_secret`, `refresh_token` |
 | `tiktok` | videos, photo posts (Content Posting API) | views, likes, comments, shares | not available in the public API | `client_key`, `client_secret`, `access_token`, `refresh_token` |
 | `website` | Markdown articles | if the site supports it | if the site supports it | `base_url`, `token` |
 
 TikTok requires `options.privacy_level` on every post (one of the values the creator's account allows), and
-unaudited TikTok apps can only post privately. Meta connectors use Graph API v26.0. Contributions for other
+unaudited TikTok apps can only post privately. Meta connectors use Graph API v26.0; Threads uses the Threads API v1.0. Contributions for other
 networks are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 You create your own developer apps on each network (X Developer Portal, Meta for Developers...) and give Relay
@@ -56,7 +57,7 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | --- | --- | --- |
 | `RELAY_API_TOKEN` | required | Bearer token for the REST API and `/mcp` (16+ chars) |
 | `RELAY_ENCRYPTION_KEY` | required | Encrypts stored credentials (AES-256-GCM). Never change it once accounts exist. |
-| `RELAY_BASE_URL` | | Public URL of this instance. Required for Instagram, which downloads media from Relay. |
+| `RELAY_BASE_URL` | | Public URL of this instance. Required for Instagram and Threads, which download media from Relay. |
 | `RELAY_ADDR` | `:8080` | Listen address |
 | `RELAY_DATA_DIR` | `./data` (`/data` in Docker) | SQLite database and media files |
 | `RELAY_TICK` | `30s` | How often due posts are checked |
@@ -165,7 +166,7 @@ curl -X POST https://<your-host>/v1/posts \
 go test ./...
 ```
 
-Tests replay X, Facebook, Instagram, YouTube, TikTok and the site protocol against fake HTTP servers, so they need no network
+Tests replay X, Facebook, Instagram, Threads, YouTube, TikTok and the site protocol against fake HTTP servers, so they need no network
 or credentials.
 
 ## License

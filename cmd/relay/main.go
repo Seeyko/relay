@@ -23,6 +23,7 @@ import (
 
 	// connectors register themselves
 	_ "github.com/Seeyko/relay/internal/providers/meta"
+	_ "github.com/Seeyko/relay/internal/providers/threads"
 	_ "github.com/Seeyko/relay/internal/providers/tiktok"
 	_ "github.com/Seeyko/relay/internal/providers/website"
 	_ "github.com/Seeyko/relay/internal/providers/x"

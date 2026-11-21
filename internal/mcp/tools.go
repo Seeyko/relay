@@ -87,7 +87,7 @@ func BuildTools(svc *core.Service) []Tool {
 			Admin:       true,
 			Description: "Connect a new account. Credentials are verified against the network, then stored encrypted.",
 			InputSchema: obj(map[string]any{
-				"provider":    str("Network name from list_providers, e.g. x, website, facebook, instagram"),
+				"provider":    str("Network name from list_providers, e.g. x, website, facebook, instagram, threads"),
 				"name":        str("Optional label"),
 				"credentials": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Credential fields listed by list_providers"},
 			}, "provider", "credentials"),
@@ -273,7 +273,7 @@ func BuildTools(svc *core.Service) []Tool {
 				"Use it to find what works: best hours, best formats, best networks. Reposts are excluded by default.",
 			InputSchema: obj(map[string]any{
 				"since": str("RFC3339 or duration like 720h (default 30 days)"), "until": str("RFC3339, default now"),
-				"account_id": str(""), "provider": str("x, tiktok, youtube, instagram, facebook, website"),
+				"account_id": str(""), "provider": str("x, threads, tiktok, youtube, instagram, facebook, website"),
 				"group_by": str("see description"), "metric": str("views | likes | comments | shares | saves | engagement | engagement_rate | any raw key; default engagement"),
 				"top": num("top/bottom posts to return, default 5"), "include_reposts": map[string]any{"type": "boolean"},
 			}),
