@@ -47,6 +47,13 @@ func TestDraftsAndPreview(t *testing.T) {
 		}
 	}
 
+	if err := h.st.AddAccountSnapshot(ctx, ig.ID, planned.Add(-48*time.Hour), map[string]int64{"followers": 10}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.AddAccountSnapshot(ctx, ig.ID, planned.Add(-24*time.Hour), map[string]int64{"followers": 12}); err != nil {
+		t.Fatal(err)
+	}
+
 	if code, _ := h.do("GET", "/ui/api/drafts", nil, nil); code != 401 {
 		t.Fatalf("drafts without session: want 401, got %d", code)
 	}
@@ -121,6 +128,9 @@ func TestDraftsAndPreview(t *testing.T) {
 	if igp["post"].(map[string]any)["id"] != gi.ID || igp["layout"] != "caption" || igp["account"].(map[string]any)["handle"] != "rmp.ig" {
 		t.Fatalf("instagram preview: %v", igp)
 	}
+	if igp["followers"].(float64) != 12 {
+		t.Fatalf("followers should come from the latest account snapshot: %v", igp["followers"])
+	}
 	if _, leak := igp["account"].(map[string]any)["credentials"]; leak {
 		t.Fatal("credentials must never reach the dashboard")
 	}
@@ -139,6 +149,9 @@ func TestDraftsAndPreview(t *testing.T) {
 	texts := xp["texts"].([]any)
 	if xp["layout"] != "thread" || len(texts) != 2 || texts[0].(map[string]any)["count"].(float64) != 300 || texts[0].(map[string]any)["limit"].(float64) != 280 || texts[1].(map[string]any)["text"] != "second part" {
 		t.Fatalf("x thread preview: %v", xp)
+	}
+	if _, ok := xp["followers"]; ok {
+		t.Fatalf("an account without snapshot has no followers: %v", xp["followers"])
 	}
 	probs := xp["problems"].([]any)
 	if len(probs) == 0 || !strings.Contains(probs[0].(string), "280") {
