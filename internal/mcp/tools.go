@@ -140,13 +140,15 @@ func BuildTools(svc *core.Service) []Tool {
 		{
 			Name: "schedule_post",
 			Description: "Schedule a post (or a thread) on one or several accounts. scheduled_at is RFC3339 with timezone (e.g. 2026-11-20T09:00:00+01:00); " +
-				"omit it or use 'now' to publish within 30 seconds, or 'draft' to keep it as a draft. Use per_account to give a network its own text.",
+				"omit it or use 'now' to publish within 30 seconds, or 'draft' to keep it as a draft. A draft can carry planned_at, the time it is meant to go out: " +
+				"it shows in the owner's calendar and approve_post schedules it then. Use per_account to give a network its own text.",
 			InputSchema: obj(map[string]any{
 				"account_ids":  strs("Target account ids"),
 				"text":         str("Post text"),
 				"thread":       strs("Thread parts, instead of text"),
 				"media":        strs("Media ids from upload_media_from_url"),
 				"scheduled_at": str("RFC3339, 'now' or 'draft'"),
+				"planned_at":   str("Drafts only: intended publish time, RFC3339 with offset. Nothing is published until approve_post."),
 				"per_account":  map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "account id -> text override"},
 				"options":      map[string]any{"type": "object", "description": "Provider options, e.g. {\"reply_to\": \"<remote id>\", \"alt\": \"image description\"}"},
 			}, "account_ids"),
@@ -156,14 +158,19 @@ func BuildTools(svc *core.Service) []Tool {
 					return nil, err
 				}
 				if RoleFrom(ctx) == RoleDrafter {
-					in.ScheduledAt = "draft" // drafters stage, humans approve
+					// Drafters stage, humans approve. A date they ask for becomes the draft's planned time.
+					if _, err := time.Parse(time.RFC3339, strings.TrimSpace(in.ScheduledAt)); err == nil && in.PlannedAt == "" {
+						in.PlannedAt = in.ScheduledAt
+					}
+					in.ScheduledAt = "draft"
 				}
 				return svc.Schedule(ctx, in)
 			},
 		},
 		{
-			Name:        "list_posts",
-			Description: "List posts, newest first. Filter by status (draft, scheduled, published, failed), account, source (relay or imported) and date range.",
+			Name: "list_posts",
+			Description: "List posts, newest first. Filter by status (draft, scheduled, published, failed), account, source (relay or imported) and date range. " +
+				"Dates are published_at, else scheduled_at, else planned_at (drafts), else created_at.",
 			InputSchema: obj(map[string]any{
 				"status": str("draft | scheduled | publishing | published | failed"), "account_id": str(""), "source": str("relay | imported"),
 				"from": str("RFC3339"), "to": str("RFC3339"), "limit": num("default 50"), "offset": num(""),
@@ -215,9 +222,10 @@ func BuildTools(svc *core.Service) []Tool {
 			},
 		},
 		{
-			Name:        "update_post",
-			Description: "Edit a draft, scheduled or failed post: text, thread, media, options or scheduled_at (RFC3339, 'now', 'draft'). Rescheduling a failed post retries it.",
-			InputSchema: obj(map[string]any{"id": str("Post id"), "text": str(""), "thread": strs(""), "media": strs(""), "scheduled_at": str(""), "options": map[string]any{"type": "object"}}, "id"),
+			Name: "update_post",
+			Description: "Edit a draft, scheduled or failed post: text, thread, media, options, scheduled_at (RFC3339, 'now', 'draft') or planned_at (drafts only, RFC3339; '' or 'none' clears it). " +
+				"Rescheduling a failed post retries it. Moving a scheduled post back to 'draft' keeps its time as planned_at.",
+			InputSchema: obj(map[string]any{"id": str("Post id"), "text": str(""), "thread": strs(""), "media": strs(""), "scheduled_at": str(""), "planned_at": str("Drafts only: RFC3339, or '' / 'none' to clear"), "options": map[string]any{"type": "object"}}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct {
 					ID string `json:"id"`
@@ -549,7 +557,7 @@ func BuildTools(svc *core.Service) []Tool {
 		{
 			Name:        "approve_post",
 			Admin:       true,
-			Description: "Approve a draft: schedule it at scheduled_at (RFC3339) or publish within one tick when omitted. Use it to release drafts staged by a drafter key.",
+			Description: "Approve a draft: schedule it at scheduled_at (RFC3339) or, when omitted, at its planned_at if that is still in the future, else publish within one tick. Use it to release drafts staged by a drafter key.",
 			InputSchema: obj(map[string]any{"id": str("Post id"), "scheduled_at": str("RFC3339 or 'now'")}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct {
@@ -559,18 +567,7 @@ func BuildTools(svc *core.Service) []Tool {
 				if err != nil {
 					return nil, err
 				}
-				p, err := svc.Store.GetPost(ctx, a.ID)
-				if err != nil {
-					return nil, err
-				}
-				if p.Status != store.StatusDraft {
-					return nil, &core.ErrInvalid{Msg: "post is " + p.Status + ", not a draft"}
-				}
-				at := a.ScheduledAt
-				if at == "" {
-					at = "now"
-				}
-				return svc.UpdatePost(ctx, a.ID, core.UpdateInput{ScheduledAt: &at})
+				return svc.Approve(ctx, a.ID, a.ScheduledAt)
 			},
 		},
 		{

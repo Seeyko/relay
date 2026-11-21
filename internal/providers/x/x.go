@@ -35,6 +35,7 @@ func init() {
 		Description:      "X / Twitter via API v2 (OAuth 1.0a user context). Publishing, threads, images/videos, metrics, replies, history import.",
 		CredentialFields: []string{"consumer_key", "consumer_secret", "access_token", "access_token_secret"},
 		Validate:         validate,
+		Count:            WeightedLength,
 		New: func(c map[string]string, _ func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			for _, k := range []string{"consumer_key", "consumer_secret", "access_token", "access_token_secret"} {
 				if c[k] == "" {

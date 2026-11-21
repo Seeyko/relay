@@ -148,12 +148,30 @@ CREATE TABLE IF NOT EXISTS ui_sessions (
 );
 `
 
+// columns added after the first release: table, column, definition.
+var addedColumns = [][3]string{
+	{"posts", "planned_at", "TIMESTAMP"},
+}
+
 func (s *Store) migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(feedbackSchema)
-	return err
+	if _, err := s.db.Exec(feedbackSchema); err != nil {
+		return err
+	}
+	for _, c := range addedColumns {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c[0], c[1]).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE ` + c[0] + ` ADD COLUMN ` + c[1] + ` ` + c[2]); err != nil {
+				return fmt.Errorf("migrate %s.%s: %w", c[0], c[1], err)
+			}
+		}
+	}
+	return nil
 }
 
 // ---------- Accounts ----------
@@ -243,6 +261,7 @@ type Post struct {
 	Media         []string         `json:"media"`   // media ids attached to the first part
 	Options       map[string]any   `json:"options"` // provider-specific (title, privacy, ...)
 	ScheduledAt   *time.Time       `json:"scheduled_at,omitempty"`
+	PlannedAt     *time.Time       `json:"planned_at,omitempty"` // drafts only: intended time; approve_post schedules it then, it never publishes by itself
 	PublishedAt   *time.Time       `json:"published_at,omitempty"`
 	RemoteID      string           `json:"remote_id,omitempty"`
 	RemoteIDs     []string         `json:"remote_ids,omitempty"`
@@ -257,15 +276,15 @@ type Post struct {
 	UpdatedAt     time.Time        `json:"updated_at"`
 }
 
-const postCols = `id,group_id,account_id,status,parts,media,options,scheduled_at,published_at,remote_id,remote_ids,remote_url,error,attempts,next_attempt_at,metrics,metrics_at,source,created_at,updated_at`
+const postCols = `id,group_id,account_id,status,parts,media,options,scheduled_at,published_at,remote_id,remote_ids,remote_url,error,attempts,next_attempt_at,metrics,metrics_at,source,created_at,updated_at,planned_at`
 
 type scanner interface{ Scan(...any) error }
 
 func scanPost(r scanner) (*Post, error) {
 	p := &Post{}
 	var parts, media, opts, rids, metrics string
-	var sched, pub, next, mAt sql.NullTime
-	if err := r.Scan(&p.ID, &p.GroupID, &p.AccountID, &p.Status, &parts, &media, &opts, &sched, &pub, &p.RemoteID, &rids, &p.RemoteURL, &p.Error, &p.Attempts, &next, &metrics, &mAt, &p.Source, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	var sched, pub, next, mAt, planned sql.NullTime
+	if err := r.Scan(&p.ID, &p.GroupID, &p.AccountID, &p.Status, &parts, &media, &opts, &sched, &pub, &p.RemoteID, &rids, &p.RemoteURL, &p.Error, &p.Attempts, &next, &metrics, &mAt, &p.Source, &p.CreatedAt, &p.UpdatedAt, &planned); err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(parts), &p.Parts)
@@ -277,6 +296,7 @@ func scanPost(r scanner) (*Post, error) {
 	p.PublishedAt = nt(pub)
 	p.NextAttemptAt = nt(next)
 	p.MetricsAt = nt(mAt)
+	p.PlannedAt = nt(planned)
 	if p.Media == nil {
 		p.Media = []string{}
 	}
@@ -326,9 +346,9 @@ func (s *Store) CreatePost(ctx context.Context, p *Post) error {
 		p.CreatedAt = now
 	}
 	p.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `INSERT INTO posts(`+postCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO posts(`+postCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.GroupID, p.AccountID, p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt,
-		p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.Source, p.CreatedAt, p.UpdatedAt)
+		p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.Source, p.CreatedAt, p.UpdatedAt, p.PlannedAt)
 	return err
 }
 
@@ -353,8 +373,8 @@ func (s *Store) UpsertImported(ctx context.Context, p *Post) (created bool, err 
 
 func (s *Store) UpdatePost(ctx context.Context, p *Post) error {
 	p.UpdatedAt = time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?,parts=?,media=?,options=?,scheduled_at=?,published_at=?,remote_id=?,remote_ids=?,remote_url=?,error=?,attempts=?,next_attempt_at=?,metrics=?,metrics_at=?,updated_at=? WHERE id=?`,
-		p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt, p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.UpdatedAt, p.ID)
+	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?,parts=?,media=?,options=?,scheduled_at=?,published_at=?,remote_id=?,remote_ids=?,remote_url=?,error=?,attempts=?,next_attempt_at=?,metrics=?,metrics_at=?,updated_at=?,planned_at=? WHERE id=?`,
+		p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt, p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.UpdatedAt, p.PlannedAt, p.ID)
 	if err != nil {
 		return err
 	}
@@ -388,7 +408,7 @@ type PostFilter struct {
 	AccountID string
 	GroupID   string
 	Source    string
-	From, To  *time.Time // on scheduled_at or published_at
+	From, To  *time.Time // on published_at, scheduled_at, planned_at (drafts) or created_at
 	Limit     int
 	Offset    int
 }
@@ -413,18 +433,18 @@ func (s *Store) ListPosts(ctx context.Context, f PostFilter) ([]*Post, error) {
 		args = append(args, f.Source)
 	}
 	if f.From != nil {
-		where = append(where, "COALESCE(published_at, scheduled_at, created_at) >= ?")
+		where = append(where, "COALESCE(published_at, scheduled_at, planned_at, created_at) >= ?")
 		args = append(args, f.From.UTC())
 	}
 	if f.To != nil {
-		where = append(where, "COALESCE(published_at, scheduled_at, created_at) < ?")
+		where = append(where, "COALESCE(published_at, scheduled_at, planned_at, created_at) < ?")
 		args = append(args, f.To.UTC())
 	}
 	q := `SELECT ` + postCols + ` FROM posts`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += " ORDER BY COALESCE(published_at, scheduled_at, created_at) DESC"
+	q += " ORDER BY COALESCE(published_at, scheduled_at, planned_at, created_at) DESC"
 	if f.Limit <= 0 || f.Limit > 1000 {
 		f.Limit = 100
 	}
@@ -855,7 +875,7 @@ func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult,
 
 // Schema is shown to agents so they can write queries.
 const Schema = `accounts(id, provider, name, handle, remote_user_id, created_at)
-posts(id, group_id, account_id, status, parts JSON array, media JSON array, options JSON, scheduled_at, published_at,
+posts(id, group_id, account_id, status, parts JSON array, media JSON array, options JSON, scheduled_at, planned_at (drafts only), published_at,
       remote_id, remote_ids JSON, remote_url, error, attempts, metrics JSON (latest), metrics_at, source 'relay'|'imported', created_at)
 metric_snapshots(post_id, at, metrics JSON)      -- one row per collection, for growth curves
 account_snapshots(account_id, at, metrics JSON)  -- followers, following, posts over time

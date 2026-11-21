@@ -122,6 +122,9 @@ type ScheduleInput struct {
 	PerAccount map[string]string `json:"per_account"`
 	// Force skips the pre-flight validation.
 	Force bool `json:"force"`
+	// PlannedAt (RFC3339, drafts only) is when the draft is meant to go out. It does not publish anything:
+	// approve_post schedules the draft at that time if it is still in the future.
+	PlannedAt string `json:"planned_at"`
 }
 
 func (in *ScheduleInput) parts() []string {
@@ -156,6 +159,17 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 		}
 		t = t.UTC()
 		at = &t
+	}
+	var planned *time.Time
+	if strings.TrimSpace(in.PlannedAt) != "" {
+		if status != store.StatusDraft {
+			return nil, invalid("planned_at is only for drafts (scheduled_at: \"draft\"); use scheduled_at to schedule a post")
+		}
+		t, err := parseTime("planned_at", in.PlannedAt)
+		if err != nil {
+			return nil, err
+		}
+		planned = &t
 	}
 	for _, m := range in.Media {
 		if _, err := s.Store.GetMedia(ctx, m); err != nil {
@@ -202,7 +216,7 @@ func (s *Service) Schedule(ctx context.Context, in ScheduleInput) ([]*store.Post
 			opts[k] = v
 		}
 		opts["kind"] = kindOf(plan[a.ID], files, opts)
-		p := &store.Post{GroupID: group, AccountID: a.ID, Status: status, Parts: plan[a.ID], Media: in.Media, Options: opts, ScheduledAt: at}
+		p := &store.Post{GroupID: group, AccountID: a.ID, Status: status, Parts: plan[a.ID], Media: in.Media, Options: opts, ScheduledAt: at, PlannedAt: planned}
 		if err := s.Store.CreatePost(ctx, p); err != nil {
 			return nil, err
 		}
@@ -218,6 +232,16 @@ type UpdateInput struct {
 	Media       []string       `json:"media"`
 	ScheduledAt *string        `json:"scheduled_at"`
 	Options     map[string]any `json:"options"`
+	PlannedAt   *string        `json:"planned_at"` // drafts only: RFC3339, "" or "none" removes it
+}
+
+// parseTime reads an RFC3339 time with its offset and returns it in UTC.
+func parseTime(field, v string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(v))
+	if err != nil {
+		return time.Time{}, invalid("%s must be RFC3339 with an offset (e.g. 2026-11-20T09:00:00+01:00): %v", field, err)
+	}
+	return t.UTC(), nil
 }
 
 func (s *Service) UpdatePost(ctx context.Context, id string, in UpdateInput) (*store.Post, error) {
@@ -243,21 +267,63 @@ func (s *Service) UpdatePost(ctx context.Context, id string, in UpdateInput) (*s
 	if in.ScheduledAt != nil {
 		switch *in.ScheduledAt {
 		case "draft":
+			// Back to draft: the old schedule becomes the planned time, unless planned_at says otherwise.
+			if p.Status != store.StatusDraft && p.ScheduledAt != nil && in.PlannedAt == nil {
+				t := *p.ScheduledAt
+				p.PlannedAt = &t
+			}
 			p.Status, p.ScheduledAt = store.StatusDraft, nil
 		case "", "now":
 			t := s.now()
-			p.Status, p.ScheduledAt = store.StatusScheduled, &t
+			p.Status, p.ScheduledAt, p.PlannedAt = store.StatusScheduled, &t, nil
 		default:
-			t, err := time.Parse(time.RFC3339, *in.ScheduledAt)
+			t, err := parseTime("scheduled_at", *in.ScheduledAt)
 			if err != nil {
-				return nil, invalid("scheduled_at must be RFC3339: %v", err)
+				return nil, err
 			}
-			t = t.UTC()
-			p.Status, p.ScheduledAt = store.StatusScheduled, &t
+			p.Status, p.ScheduledAt, p.PlannedAt = store.StatusScheduled, &t, nil
 		}
 		p.Attempts, p.NextAttemptAt, p.Error = 0, nil, ""
 	}
+	if in.PlannedAt != nil {
+		if p.Status != store.StatusDraft {
+			return nil, invalid("planned_at is only for drafts; this post is %s (use scheduled_at)", p.Status)
+		}
+		switch v := strings.TrimSpace(*in.PlannedAt); v {
+		case "", "none":
+			p.PlannedAt = nil
+		default:
+			t, err := parseTime("planned_at", v)
+			if err != nil {
+				return nil, err
+			}
+			p.PlannedAt = &t
+		}
+	}
 	return p, s.Store.UpdatePost(ctx, p)
+}
+
+// Approve releases a draft. scheduledAt (RFC3339 or "now") wins when given; otherwise the draft is
+// scheduled at its planned time if that is still in the future, else it publishes within one tick.
+func (s *Service) Approve(ctx context.Context, id, scheduledAt string) (*store.Post, error) {
+	p, err := s.Store.GetPost(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if p.Status != store.StatusDraft {
+		return nil, invalid("post is %s, not a draft", p.Status)
+	}
+	at := strings.TrimSpace(scheduledAt)
+	if at == "draft" {
+		return nil, invalid("scheduled_at must be RFC3339 or 'now' to approve a draft")
+	}
+	if at == "" {
+		at = "now"
+		if p.PlannedAt != nil && p.PlannedAt.After(s.now()) {
+			at = p.PlannedAt.Format(time.RFC3339)
+		}
+	}
+	return s.UpdatePost(ctx, id, UpdateInput{ScheduledAt: &at})
 }
 
 // PublishNow publishes synchronously, regardless of the schedule.
