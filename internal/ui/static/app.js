@@ -570,7 +570,11 @@ async function openPreview(p) {
   const holder = el("div", "pv-body");
   holder.append(el("div", "pv-loading"));
   body.replaceChildren(top, holder);
-  if (!dlg.open) { lockPage(); dlg.showModal(); }
+  if (!dlg.open) {
+    lockPage(); dlg.showModal();
+    // showModal focuses the first button (close), which draws a ring on touch screens: focus the sheet itself.
+    body.tabIndex = -1; body.focus({ preventScroll: true });
+  }
 
   let data;
   try { data = await api("posts/" + encodeURIComponent(p.id)); }
