@@ -25,6 +25,15 @@ type PreviewText struct {
 	Unit  string `json:"unit"` // chars or bytes
 	// Fold is roughly how many characters the network shows before its "more" cut (0: no cut).
 	Fold int `json:"fold,omitempty"`
+	// Media is the media shown under this block. Set on the parts after the first of an X or Threads
+	// thread (the first part's media is PostPreview.Media).
+	Media []PreviewMedia `json:"media,omitempty"`
+}
+
+// PreviewDocument is a LinkedIn document post built by Relay from the images (options.images_as_document).
+type PreviewDocument struct {
+	Title string `json:"title"`
+	Pages int    `json:"pages"`
 }
 
 // PreviewMedia is one attached file, in publishing order.
@@ -46,12 +55,19 @@ type PostPreview struct {
 	// dashboard then draws the first letter of the name).
 	AccountAvatar string `json:"account_avatar,omitempty"`
 	// Layout says how the network lays the post out: thread (X, Threads), caption (Instagram, Facebook,
-	// TikTok), video (YouTube), post_comments (LinkedIn: extra parts become comments), article (website).
-	Layout   string         `json:"layout"`
-	Title    *PreviewText   `json:"title,omitempty"`
-	Texts    []PreviewText  `json:"texts"`
-	Media    []PreviewMedia `json:"media"`
-	Problems []string       `json:"problems"`
+	// TikTok), video (YouTube), post_comments (LinkedIn, Facebook, Instagram: extra parts become comments
+	// of the account on the post), article (website).
+	Layout string        `json:"layout"`
+	Title  *PreviewText  `json:"title,omitempty"`
+	Texts  []PreviewText `json:"texts"`
+	// Media is the media of the first part.
+	Media []PreviewMedia `json:"media"`
+	// PartMedia is the media of every part, aligned with the parts (part_media[0] is media). Only set
+	// when a part after the first has media.
+	PartMedia [][]PreviewMedia `json:"part_media,omitempty"`
+	// Document is set when LinkedIn will receive the images as one PDF document (a swipeable carousel).
+	Document *PreviewDocument `json:"document,omitempty"`
+	Problems []string         `json:"problems"`
 	// Stats are the normalized counters of a published post (see PublicStats).
 	Stats map[string]float64 `json:"stats,omitempty"`
 	// Followers is the account's audience from its latest snapshot (LinkedIn and YouTube show it).
@@ -149,23 +165,40 @@ func (s *Service) PreviewPost(ctx context.Context, p *store.Post, acc *store.Acc
 	if p.Status == store.StatusPublished {
 		pv.Stats = PublicStats(p.Metrics)
 	}
-	var files []providers.MediaFile
-	for _, id := range p.Media {
-		m, err := s.Store.GetMedia(ctx, id)
-		if err != nil {
-			pv.Media = append(pv.Media, PreviewMedia{ID: id, Missing: true})
-			pv.Problems = append(pv.Problems, "media "+id+" is missing")
-			continue
+	partIDs := postPartMedia(p)
+	files := make([][]providers.MediaFile, len(partIDs))
+	shown := make([][]PreviewMedia, len(partIDs))
+	for i, ids := range partIDs {
+		shown[i] = []PreviewMedia{}
+		for _, id := range ids {
+			m, err := s.Store.GetMedia(ctx, id)
+			if err != nil {
+				shown[i] = append(shown[i], PreviewMedia{ID: id, Missing: true})
+				pv.Problems = append(pv.Problems, "media "+id+" is missing")
+				continue
+			}
+			shown[i] = append(shown[i], PreviewMedia{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size, Path: "/media/" + m.Key()})
+			files[i] = append(files[i], providers.MediaFile{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size, PublicURL: s.MediaURL(m),
+				Open: func() (io.ReadCloser, error) { return s.OpenMedia(ctx, m) }})
 		}
-		pv.Media = append(pv.Media, PreviewMedia{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size, Path: "/media/" + m.Key()})
-		files = append(files, providers.MediaFile{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size, PublicURL: s.MediaURL(m),
-			Open: func() (io.ReadCloser, error) { return s.OpenMedia(ctx, m) }})
+	}
+	pv.Media = shown[0]
+	if len(shown) > 1 {
+		pv.PartMedia = shown
 	}
 	provider := ""
 	if acc != nil {
 		provider = acc.Provider
 	}
 	pv.Layout, pv.Title, pv.Texts = layout(provider, p.Parts, p.Options)
+	for i := 1; i < len(pv.Texts) && i < len(shown) && pv.Layout == "thread"; i++ {
+		if len(shown[i]) > 0 {
+			pv.Texts[i].Media = shown[i]
+		}
+	}
+	if provider == "linkedin-page" && optBool(p.Options, "images_as_document") {
+		pv.Document = &PreviewDocument{Title: providers.DocumentTitle(p.Options, p.Parts), Pages: len(pv.Media)}
+	}
 	// Pre-flight checks only make sense for posts that are still to be published.
 	if acc != nil && (p.Status == store.StatusDraft || p.Status == store.StatusScheduled || p.Status == store.StatusFailed) {
 		pv.Problems = append(pv.Problems, s.validate(acc, p.Parts, files, p.Options)...)
@@ -174,6 +207,16 @@ func (s *Service) PreviewPost(ctx context.Context, p *store.Post, acc *store.Acc
 		pv.Problems = append(pv.Problems, "account "+p.AccountID+" no longer exists")
 	}
 	return pv
+}
+
+func optBool(o map[string]any, k string) bool {
+	switch v := o[k].(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true"
+	}
+	return false
 }
 
 func layout(provider string, parts []string, opts map[string]any) (string, *PreviewText, []PreviewText) {
@@ -213,10 +256,27 @@ func layout(provider string, parts []string, opts map[string]any) (string, *Prev
 			}
 		}
 		return "post_comments", nil, out
-	case "instagram":
-		return "caption", nil, []PreviewText{block("caption", joined, 2200, 125)}
-	case "facebook":
-		return "caption", nil, []PreviewText{block("caption", joined, 63206, 480)}
+	case "instagram", "facebook":
+		// Part 1 is the caption, parts 2..n become comments of the account on the post.
+		capLimit, capFold, comLimit := 2200, 125, 2200
+		if provider == "facebook" {
+			capLimit, capFold, comLimit = 63206, 480, 8000
+		}
+		out := make([]PreviewText, 0, len(parts))
+		for i, t := range parts {
+			if i == 0 {
+				out = append(out, block("caption", t, capLimit, capFold))
+			} else {
+				out = append(out, block("comment", t, comLimit, 0))
+			}
+		}
+		if len(out) == 0 {
+			out = append(out, block("caption", "", capLimit, capFold))
+		}
+		if len(out) == 1 {
+			return "caption", nil, out
+		}
+		return "post_comments", nil, out
 	case "tiktok":
 		if mt, _ := opts["media_type"].(string); strings.EqualFold(mt, "PHOTO") {
 			var title *PreviewText

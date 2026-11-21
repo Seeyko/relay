@@ -187,6 +187,33 @@ function grid(c, cls, max) {
   return g;
 }
 
+// The media of thread part i: part 1 is c.media, the later parts carry theirs in the preview.
+function partMedia(c, i) {
+  if (i === 0) return c.media;
+  const pm = c.pp.part_media && c.pp.part_media[i];
+  return pm || (c.pp.texts[i] && c.pp.texts[i].media) || [];
+}
+
+// Parts 2..n of a Facebook or Instagram post: comments of the account under the post.
+function metaComments(c, net) {
+  const box = el("div", "mc-list mc-" + net);
+  c.pp.texts.slice(1).forEach((t) => {
+    const row = el("div", "mc-row");
+    const col = el("div", "mc-col");
+    const bubble = el("div", "mc-bubble");
+    const who = net === "fb" ? c.name : bare(c.handle);
+    if (net === "fb") {
+      bubble.append(el("b", "mc-name", who), folded(t.text, { cls: "mc-text", fold: 0, more: NT.more }));
+    } else {
+      bubble.append(folded(t.text, { cls: "mc-text", fold: 0, more: NT.more, lead: () => el("b", "", who) }));
+    }
+    col.append(bubble, el("div", "mc-act", `${stamp(c, "compact")} · ${NT.reply}`));
+    row.append(avatar(c, net === "fb" ? 32 : 28), col);
+    box.append(row);
+  });
+  return box;
+}
+
 function action(d, label, cls, filled) {
   const a = el("span", "nw-act" + (cls ? " " + cls : ""));
   a.append(ic(d, "", filled));
@@ -236,9 +263,11 @@ function mockX(c) {
     head.append(el("b", "x-name", c.name), el("span", "x-sub", `${at(c.handle)} · ${stamp(c, "x")}`), ic(G.more, "x-more"));
     main.append(head);
     if (t.text) main.append(folded(t.text, { cls: "x-text", fold: t.limit > 280 ? 280 : 0, more: FR ? "Afficher plus" : "Show more", ell: "… " }));
-    if (i === 0 && c.media.length) {
-      const g = grid(c, "x-media", 4);
-      if (c.media.length === 1) fit(g, g.querySelector("img,video") || g, 0.75, 1.91, "16 / 9");
+    const list = partMedia(c, i);
+    if (list.length) {
+      const pc = { ...c, media: list, video: i === 0 ? c.video : list.some(isVid) };
+      const g = grid(pc, "x-media", 4);
+      if (list.length === 1) fit(g, g.querySelector("img,video") || g, 0.75, 1.91, "16 / 9");
       main.append(g);
     }
     const st = i === 0 ? c.st : {};
@@ -269,16 +298,17 @@ function mockThreads(c) {
     head.append(el("b", "", bare(c.handle)), el("span", "th-time", stamp(c, "compact")), ic(G.more, "th-more"));
     main.append(head);
     if (t.text) main.append(folded(t.text, { cls: "th-text" }));
-    if (i === 0 && c.media.length === 1) {
+    const list = partMedia(c, i);
+    if (list.length === 1) {
       const box = el("div", "th-one");
-      const n = media(c.media[0]);
+      const n = media(list[0]);
       box.append(n);
-      if (c.video) box.append(playBadge());
+      if (isVid(list[0]) || (i === 0 && c.video)) box.append(playBadge());
       fit(box, n, 0.75, 1.91, "4 / 5");
       main.append(box);
-    } else if (i === 0 && c.media.length) {
+    } else if (list.length) {
       const strip = el("div", "th-strip");
-      c.media.forEach((m) => {
+      list.forEach((m) => {
         const f = el("div", "th-cell");
         const n = media(m);
         f.append(n);
@@ -354,6 +384,7 @@ function mockInstagram(c) {
       lead: () => el("b", "", bare(c.handle)) }));
   }
   if (c.st.comments > 0) root.append(el("div", "ig-all", NT.viewAll(fCompact.format(c.st.comments))));
+  if (c.pp.texts.length > 1) root.append(metaComments(c, "ig"));
   root.append(el("div", "ig-time", stamp(c, "long")));
   return root;
 }
@@ -498,6 +529,7 @@ function mockFacebook(c) {
   const bar = el("div", "fb-actions");
   bar.append(action(G.thumb, NT.like), action(G.fbComment, NT.comment), action(G.fbShare, NT.share));
   root.append(bar);
+  if (c.pp.texts.length > 1) root.append(metaComments(c, "fb"));
   return root;
 }
 
@@ -516,7 +548,8 @@ function mockLinkedIn(c) {
   root.append(head);
   const [first, ...comments] = c.pp.texts;
   if (first && first.text) root.append(folded(first.text, { cls: "li-text", fold: first.fold, more: NT.more, ell: " …", lines: 3 }));
-  if (c.media.length) {
+  if (c.pp.document && c.media.length) root.append(liDocument(c));
+  else if (c.media.length) {
     const g = grid(c, "li-media", 4);
     if (c.media.length === 1) fit(g, g.querySelector("img,video") || g, 0.8, 1.91, "1.91 / 1");
     root.append(g);
@@ -548,6 +581,19 @@ function mockLinkedIn(c) {
     root.append(row);
   });
   return root;
+}
+
+// The images sent as one PDF document: LinkedIn shows it as a swipeable carousel under its title.
+function liDocument(c) {
+  const n = c.media.length;
+  const box = el("div", "li-doc");
+  const head = el("div", "li-doc-head");
+  const page = el("span", "li-doc-page", `1 / ${n}`);
+  head.append(el("b", "", c.pp.document.title), page);
+  const track = slides(c, "li-doc-track", (i) => { page.textContent = `${i + 1} / ${n}`; });
+  fit(track, track.querySelector("img") || track, 0.8, 1.91, "4 / 5");
+  box.append(head, track);
+  return box;
 }
 
 // ---------- TikTok ----------
@@ -630,7 +676,15 @@ function netMock(pp, tz, live) {
   };
   if (acc.provider === "facebook") c.reel = opts.reel === true || kind === "reel";
   const wrap = el("div", "nwrap");
-  wrap.append(fn(c));
+  const drawn = fn(c);
+  wrap.append(drawn);
+  // Reels and stories are full-screen: the comments of a Facebook or Instagram post go under the mockup.
+  const net = { facebook: "fb", instagram: "ig" }[acc.provider];
+  if (net && pp.texts.length > 1 && drawn.classList.contains("vt")) {
+    const below = el("div", "nw nw-" + net);
+    below.append(metaComments(c, net));
+    wrap.append(below);
+  }
   const counts = [pp.title, ...pp.texts].filter(Boolean).map((t) => counter(t, live)).filter(Boolean);
   if (counts.length) {
     const row = el("div", "nw-counts");

@@ -512,7 +512,7 @@ func TestThreadsProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: []string{"one", "two"}, Media: []string{m.ID}})
+	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: core.TextThread("one", "two"), Media: []string{m.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +580,7 @@ func TestLinkedInPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: []string{"hello li (page)", "part two"}})
+	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: core.TextThread("hello li (page)", "part two")})
 	if err != nil {
 		t.Fatal(err)
 	}

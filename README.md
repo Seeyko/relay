@@ -24,11 +24,11 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 
 | Provider | Publish | Metrics | Comments | Credentials |
 | --- | --- | --- | --- | --- |
-| `x` | text, threads, images, videos | public + impressions (< 30 days) | read + reply | OAuth 1.0a user keys |
-| `linkedin-page` | text, link/article, image, multi-image (2-20), video, document (PDF...); extra thread parts as comments | impressions, unique impressions, clicks, likes, comments, shares (organic, 12 months) + followers | read + reply | `organization_id`, `access_token`, `refresh_token`, `client_id`, `client_secret` |
-| `facebook` | text, link, photos, video, Reels (Pages) | reactions, comments, shares | read + reply | `page_id`, `page_access_token` |
-| `instagram` | image, carousel (up to 20), Reels, stories | likes, comments, views, reach, saves, shares | read + reply | `access_token` (Instagram Login, auto-refreshed) |
-| `threads` | text (500), image, video, carousel (2-20), threads (reply chains), replies, quotes, link attachment | views, likes, replies, reposts, quotes, shares; followers | read + reply | `access_token` (long-lived, auto-refreshed), optional `user_id` |
+| `x` | text, threads (media per part), images, videos | public + impressions (< 30 days) | read + reply | OAuth 1.0a user keys |
+| `linkedin-page` | text, link/article, image, multi-image (2-20), video, document (PDF...), images as a swipeable document carousel (2-300, `images_as_document`); extra thread parts as comments | impressions, unique impressions, clicks, likes, comments, shares (organic, 12 months) + followers | read + reply | `organization_id`, `access_token`, `refresh_token`, `client_id`, `client_secret` |
+| `facebook` | text, link, photos, video, Reels (Pages); extra thread parts as comments | reactions, comments, shares | read + reply | `page_id`, `page_access_token` |
+| `instagram` | image, carousel (up to 20), Reels, trial Reels, stories; extra thread parts as comments | likes, comments, views, reach, saves, shares | read + reply | `access_token` (Instagram Login, auto-refreshed) |
+| `threads` | text (500), image, video, carousel (2-20), threads (reply chains, media per part), replies, quotes, link attachment | views, likes, replies, reposts, quotes, shares; followers | read + reply | `access_token` (long-lived, auto-refreshed), optional `user_id` |
 | `youtube` | videos and Shorts (resumable upload) | views, likes, comments (+ YouTube Analytics) | read + reply | `client_id`, `client_secret`, `refresh_token` |
 | `tiktok` | videos, photo posts (Content Posting API) | views, likes, comments, shares | not available in the public API | `client_key`, `client_secret`, `access_token`, `refresh_token` |
 | `website` | Markdown articles | if the site supports it | if the site supports it | `base_url`, `token` |
@@ -37,6 +37,30 @@ TikTok requires `options.privacy_level` on every post (one of the values the cre
 unaudited TikTok apps can only post privately. Meta connectors use Graph API v26.0; Threads uses the Threads API v1.0. The LinkedIn connector posts as a company page with Community
 Management API scopes and sends `LinkedIn-Version: 202611` (override with the `api_version` credential). Contributions for other
 networks are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Threads, comments and per-part media
+
+A post with several parts (`thread`) is published the way each network can carry it:
+
+- **X and Threads**: a chain of replies. Each part can carry its own media: `thread` items are strings or
+  `{"text": "...", "media": ["med_..."]}` (X: up to 4 images or 1 video/GIF per part; Threads: one image, one video or a
+  carousel per part). The top-level `media` is the media of part 1; `thread[0].media` may give it instead, not both.
+- **Facebook, Instagram and LinkedIn**: part 1 is the post; parts 2..n are published right after it as **comments of
+  the account on the post**, in order (the "first comment"). Comments are text only (Facebook 8000, Instagram 2200,
+  LinkedIn 1250 characters); a later part with media is refused before publishing. Instagram stories take one part.
+  **Behaviour change:** Facebook and Instagram used to join every part into one caption. A multi-part post now
+  publishes extra parts as comments; send a single part (`text`) to keep everything in the caption.
+- **Resume**: when a thread or a comment fails half-way, the post is marked failed with the ids already published in
+  `remote_ids`. Publishing it again (`publish_now`, or `update_post` with a new `scheduled_at`) sends only the missing
+  parts, with their own media, chained to the last reply (X, Threads) or commented on the post (Facebook, Instagram, LinkedIn).
+
+Other options worth knowing:
+
+- LinkedIn `images_as_document: true` (optional `document_title`, default the first line of the text, 100 characters
+  max): Relay turns 2 to 300 images into one PDF (one page per image, page size = image size) and posts it as a
+  document, which LinkedIn shows as a swipeable carousel. 100 MB max.
+- Instagram `trial_reel: true` with `trial_graduation` `MANUAL` (default) or `SS_PERFORMANCE`: the Reel is first shown
+  to non-followers (`trial_params` on the Reels container). Single video Reels only.
 
 You create your own developer apps on each network (X Developer Portal, Meta for Developers...) and give Relay
 the resulting tokens. Relay never ships with shared API keys.
@@ -101,7 +125,8 @@ A minimal, read-only dashboard at `https://<your-host>/ui/`:
 - **Drafts**: every draft, dated or not, newest first. One card per `schedule_post` call, with each target network
   and the number of pre-flight problems.
 - **Preview** (tap any post): the whole group, one tab per account, laid out roughly the way each network shows it
-  (thread with a counter per post, Instagram caption cut, YouTube title and description, LinkedIn post and comments),
+  (thread with a counter and the media of each post, Instagram caption cut, YouTube title and description, LinkedIn,
+  Facebook and Instagram post and comments, LinkedIn document carousel),
   with every media in order (images, playable videos), the options, the planned or scheduled time in
   `RELAY_TIMEZONE`, the status and errors, and the provider's pre-flight problems, run server-side.
 

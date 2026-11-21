@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS ui_sessions (
 // columns added after the first release: table, column, definition.
 var addedColumns = [][3]string{
 	{"posts", "planned_at", "TIMESTAMP"},
+	{"posts", "part_media", "TEXT NOT NULL DEFAULT '[]'"},
 	{"accounts", "avatar_media_id", "TEXT"},
 	{"accounts", "avatar_source", "TEXT"},
 	{"accounts", "avatar_checked_at", "TIMESTAMP"},
@@ -291,7 +292,8 @@ func (s *Store) TouchAccountAvatar(ctx context.Context, id string, at time.Time)
 func (s *Store) MediaInUse(ctx context.Context, id string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM accounts WHERE avatar_media_id=?) +
-(SELECT COUNT(*) FROM posts p, json_each(p.media) j WHERE j.value=?)`, id, id).Scan(&n)
+(SELECT COUNT(*) FROM posts p, json_each(p.media) j WHERE j.value=?) +
+(SELECT COUNT(*) FROM posts p, json_each(p.part_media) a, json_each(a.value) j WHERE j.value=?)`, id, id, id).Scan(&n)
 	return n > 0, err
 }
 
@@ -324,12 +326,15 @@ const (
 )
 
 type Post struct {
-	ID            string           `json:"id"`
-	GroupID       string           `json:"group_id"`
-	AccountID     string           `json:"account_id"`
-	Status        string           `json:"status"`
-	Parts         []string         `json:"parts"`   // one element = single post, several = thread
-	Media         []string         `json:"media"`   // media ids attached to the first part
+	ID        string   `json:"id"`
+	GroupID   string   `json:"group_id"`
+	AccountID string   `json:"account_id"`
+	Status    string   `json:"status"`
+	Parts     []string `json:"parts"` // one element = single post, several = thread
+	Media     []string `json:"media"` // media ids attached to the first part
+	// PartMedia is the media of each part of a thread, aligned with Parts: part_media[0] always equals
+	// media, part_media[i] is the media of part i+1. Empty when no part after the first has media.
+	PartMedia     [][]string       `json:"part_media,omitempty"`
 	Options       map[string]any   `json:"options"` // provider-specific (title, privacy, ...)
 	ScheduledAt   *time.Time       `json:"scheduled_at,omitempty"`
 	PlannedAt     *time.Time       `json:"planned_at,omitempty"` // drafts only: intended time; approve_post schedules it then, it never publishes by itself
@@ -347,16 +352,19 @@ type Post struct {
 	UpdatedAt     time.Time        `json:"updated_at"`
 }
 
-const postCols = `id,group_id,account_id,status,parts,media,options,scheduled_at,published_at,remote_id,remote_ids,remote_url,error,attempts,next_attempt_at,metrics,metrics_at,source,created_at,updated_at,planned_at`
+const postCols = `id,group_id,account_id,status,parts,media,options,scheduled_at,published_at,remote_id,remote_ids,remote_url,error,attempts,next_attempt_at,metrics,metrics_at,source,created_at,updated_at,planned_at,part_media`
 
 type scanner interface{ Scan(...any) error }
 
 func scanPost(r scanner) (*Post, error) {
 	p := &Post{}
-	var parts, media, opts, rids, metrics string
+	var parts, media, opts, rids, metrics, partMedia string
 	var sched, pub, next, mAt, planned sql.NullTime
-	if err := r.Scan(&p.ID, &p.GroupID, &p.AccountID, &p.Status, &parts, &media, &opts, &sched, &pub, &p.RemoteID, &rids, &p.RemoteURL, &p.Error, &p.Attempts, &next, &metrics, &mAt, &p.Source, &p.CreatedAt, &p.UpdatedAt, &planned); err != nil {
+	if err := r.Scan(&p.ID, &p.GroupID, &p.AccountID, &p.Status, &parts, &media, &opts, &sched, &pub, &p.RemoteID, &rids, &p.RemoteURL, &p.Error, &p.Attempts, &next, &metrics, &mAt, &p.Source, &p.CreatedAt, &p.UpdatedAt, &planned, &partMedia); err != nil {
 		return nil, err
+	}
+	if _ = json.Unmarshal([]byte(partMedia), &p.PartMedia); len(p.PartMedia) == 0 {
+		p.PartMedia = nil
 	}
 	_ = json.Unmarshal([]byte(parts), &p.Parts)
 	_ = json.Unmarshal([]byte(media), &p.Media)
@@ -388,6 +396,45 @@ func nt(t sql.NullTime) *time.Time {
 	return &v
 }
 
+// MediaOf returns the media ids of part i (0 is the first part, whose media is Media).
+func (p *Post) MediaOf(i int) []string {
+	if i == 0 {
+		return p.Media
+	}
+	if i > 0 && i < len(p.PartMedia) {
+		return p.PartMedia[i]
+	}
+	return nil
+}
+
+// NormalizePartMedia keeps PartMedia aligned with Parts: [0] mirrors Media, parts past the last one
+// with media are dropped, and it is nil when no part after the first has media.
+func (p *Post) NormalizePartMedia() {
+	last := 0
+	for i := 1; i < len(p.PartMedia) && i < len(p.Parts); i++ {
+		if len(p.PartMedia[i]) > 0 {
+			last = i
+		}
+	}
+	if last == 0 {
+		p.PartMedia = nil
+		return
+	}
+	out := make([][]string, last+1)
+	out[0] = append([]string{}, p.Media...)
+	for i := 1; i <= last; i++ {
+		out[i] = append([]string{}, p.PartMedia[i]...)
+	}
+	p.PartMedia = out
+}
+
+func partMediaJSON(pm [][]string) string {
+	if len(pm) == 0 {
+		return "[]"
+	}
+	return js(pm)
+}
+
 func js(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
@@ -417,9 +464,10 @@ func (s *Store) CreatePost(ctx context.Context, p *Post) error {
 		p.CreatedAt = now
 	}
 	p.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `INSERT INTO posts(`+postCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	p.NormalizePartMedia()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO posts(`+postCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.GroupID, p.AccountID, p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt,
-		p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.Source, p.CreatedAt, p.UpdatedAt, p.PlannedAt)
+		p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.Source, p.CreatedAt, p.UpdatedAt, p.PlannedAt, partMediaJSON(p.PartMedia))
 	return err
 }
 
@@ -457,8 +505,9 @@ func (s *Store) SetImportedMedia(ctx context.Context, postID string, media []str
 
 func (s *Store) UpdatePost(ctx context.Context, p *Post) error {
 	p.UpdatedAt = time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?,parts=?,media=?,options=?,scheduled_at=?,published_at=?,remote_id=?,remote_ids=?,remote_url=?,error=?,attempts=?,next_attempt_at=?,metrics=?,metrics_at=?,updated_at=?,planned_at=? WHERE id=?`,
-		p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt, p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.UpdatedAt, p.PlannedAt, p.ID)
+	p.NormalizePartMedia()
+	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?,parts=?,media=?,options=?,scheduled_at=?,published_at=?,remote_id=?,remote_ids=?,remote_url=?,error=?,attempts=?,next_attempt_at=?,metrics=?,metrics_at=?,updated_at=?,planned_at=?,part_media=? WHERE id=?`,
+		p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt, p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.UpdatedAt, p.PlannedAt, partMediaJSON(p.PartMedia), p.ID)
 	if err != nil {
 		return err
 	}
@@ -974,7 +1023,7 @@ func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult,
 
 // Schema is shown to agents so they can write queries.
 const Schema = `accounts(id, provider, name, handle, remote_user_id, created_at, avatar_media_id, avatar_source 'auto'|'manual', avatar_checked_at)
-posts(id, group_id, account_id, status, parts JSON array, media JSON array, options JSON, scheduled_at, planned_at (drafts only), published_at,
+posts(id, group_id, account_id, status, parts JSON array, media JSON array (first part), part_media JSON array of arrays (media per part, [] when only the first part has media), options JSON, scheduled_at, planned_at (drafts only), published_at,
       remote_id, remote_ids JSON, remote_url, error, attempts, metrics JSON (latest), metrics_at, source 'relay'|'imported', created_at)
 metric_snapshots(post_id, at, metrics JSON)      -- one row per collection, for growth curves
 account_snapshots(account_id, at, metrics JSON)  -- followers, following, posts over time

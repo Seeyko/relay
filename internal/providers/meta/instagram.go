@@ -18,6 +18,7 @@ import (
 // Limits from the Instagram Platform docs (content publishing and IG User Media reference).
 const (
 	igMaxCaption   = 2200
+	igMaxComment   = 2200
 	igMaxHashtags  = 30
 	igMaxMentions  = 20
 	igMaxCarousel  = 20
@@ -41,7 +42,10 @@ func init() {
 		Description: "Instagram professional account via the Instagram API with Instagram Login (instagram_business_basic, " +
 			"instagram_business_content_publish, instagram_business_manage_comments, instagram_business_manage_insights). " +
 			"Image (JPEG), carousel (up to 20 items), Reels (default for video; options share_to_feed, cover_url, thumb_offset, audio_name), " +
-			"stories (options.media_type=STORIES); options location_id, collaborators; likes/comments/insights; comment replies; history import. " +
+			"stories (options.media_type=STORIES); options location_id, collaborators; trial Reels (options.trial_reel=true, " +
+			"options.trial_graduation=MANUAL (default) or SS_PERFORMANCE: shown to non-followers first). " +
+			"Thread parts: part 1 is the caption, parts 2..n are published right after as comments of the account on the post, in order " +
+			"(text only, 2200 characters each; not on stories); likes/comments/insights; comment replies; history import. " +
 			"Needs RELAY_BASE_URL reachable from the internet: Instagram downloads the media from Relay. Long-lived token is refreshed automatically. " +
 			"Accounts linked to a Facebook Page (Instagram API with Facebook Login, as Postiz connects them) also work: set login=facebook, " +
 			"user_id=<Instagram business account id> and access_token=<Page access token> (instagram_basic, instagram_content_publish, " +
@@ -98,7 +102,15 @@ func validateInstagram(req providers.PublishRequest) []string {
 	if mediaType == "REELS" && len(req.Media) == 1 && !isVideo(req.Media[0]) {
 		errs = append(errs, "an Instagram Reel needs a video")
 	}
-	caption := strings.Join(req.Parts, "\n\n")
+	if mediaType == "STORIES" && len(req.Parts) > 1 {
+		errs = append(errs, "an Instagram story cannot carry comments: use a single part")
+	}
+	errs = append(errs, commentProblems(req.Parts, igMaxComment, "Instagram")...)
+	errs = append(errs, trialProblems(req, mediaType)...)
+	caption := ""
+	if len(req.Parts) > 0 {
+		caption = req.Parts[0]
+	}
 	if n := providers.CharCount(caption); n > igMaxCaption {
 		errs = append(errs, fmt.Sprintf("Instagram captions are limited to %d characters (got %d)", igMaxCaption, n))
 	}
@@ -417,8 +429,56 @@ func setOptions(f url.Values, o map[string]any, reel, story bool) {
 	}
 }
 
+// trialGraduation reads options.trial_reel / trial_graduation: "" when the post is not a trial Reel.
+func trialGraduation(o map[string]any) (string, error) {
+	g := strings.ToUpper(strings.TrimSpace(optString(o, "trial_graduation")))
+	if optString(o, "trial_reel") != "true" {
+		if g != "" {
+			return "", errors.New("options.trial_graduation needs options.trial_reel=true")
+		}
+		return "", nil
+	}
+	switch g {
+	case "":
+		return "MANUAL", nil
+	case "MANUAL", "SS_PERFORMANCE":
+		return g, nil
+	}
+	return "", errors.New("options.trial_graduation must be MANUAL or SS_PERFORMANCE (got " + g + ")")
+}
+
+// trialProblems: a trial Reel is a single video published as a Reel (not a story, not a carousel).
+func trialProblems(req providers.PublishRequest, mediaType string) []string {
+	g, err := trialGraduation(req.Options)
+	if err != nil {
+		return []string{"Instagram " + err.Error()}
+	}
+	if g != "" && (len(req.Media) != 1 || !isVideo(req.Media[0]) || mediaType == "STORIES") {
+		return []string{"an Instagram trial Reel (options.trial_reel) needs exactly one video, published as a Reel (not a story or a carousel)"}
+	}
+	return nil
+}
+
+// Publish publishes part 1 as the caption of the media, then parts 2..n as comments of the account on it.
+// With options.thread_root (a resumed thread) or options.reply_to, every part is a comment on that media.
 func (ig *Instagram) Publish(ctx context.Context, req providers.PublishRequest) (*providers.PublishResult, error) {
 	ig.maybeRefresh(ctx)
+	if to := commentTarget(req.Options); to != "" {
+		if len(req.Media) > 0 {
+			return nil, providers.Invalid("instagram: comments are text only")
+		}
+		return ig.comments(ctx, to, req.Parts)
+	}
+	if req.LaterMedia() > 0 {
+		return nil, providers.Invalid("instagram: comments are text only")
+	}
+	trial, err := trialGraduation(req.Options)
+	if err != nil {
+		return nil, providers.Invalid("instagram: " + err.Error())
+	}
+	if strings.EqualFold(optString(req.Options, "media_type"), "STORIES") && len(req.Parts) > 1 {
+		return nil, providers.Invalid("instagram: a story cannot carry comments")
+	}
 	if len(req.Media) == 0 {
 		return nil, providers.Invalid("instagram: a post needs at least one image or video")
 	}
@@ -429,8 +489,14 @@ func (ig *Instagram) Publish(ctx context.Context, req providers.PublishRequest) 
 	if err != nil {
 		return nil, err
 	}
-	caption := strings.Join(req.Parts, "\n\n")
+	caption := ""
+	if len(req.Parts) > 0 {
+		caption = req.Parts[0]
+	}
 	mediaType := strings.ToUpper(optString(req.Options, "media_type"))
+	if trial != "" && (len(req.Media) != 1 || !isVideo(req.Media[0]) || mediaType == "STORIES") {
+		return nil, providers.Invalid("instagram: a trial Reel needs exactly one video published as a Reel")
+	}
 	var creation string
 	if len(req.Media) == 1 {
 		m := req.Media[0]
@@ -449,6 +515,10 @@ func (ig *Instagram) Publish(ctx context.Context, req providers.PublishRequest) 
 			form.Set("caption", caption)
 		}
 		setOptions(form, req.Options, mediaType == "REELS", story)
+		if trial != "" {
+			b, _ := json.Marshal(map[string]string{"graduation_strategy": trial})
+			form.Set("trial_params", string(b))
+		}
 		if creation, err = ig.container(ctx, uid, form); err != nil {
 			return nil, err
 		}
@@ -503,7 +573,40 @@ func (ig *Instagram) Publish(ctx context.Context, req providers.PublishRequest) 
 		Permalink string `json:"permalink"`
 	}
 	_ = ig.g.get(ctx, "/"+r.ID, url.Values{"fields": {"permalink"}}, &p)
-	return &providers.PublishResult{RemoteID: r.ID, RemoteIDs: []string{r.ID}, URL: p.Permalink}, nil
+	res := &providers.PublishResult{RemoteID: r.ID, RemoteIDs: []string{r.ID}, URL: p.Permalink}
+	if len(req.Parts) > 1 {
+		more, err := ig.comments(ctx, r.ID, req.Parts[1:])
+		if more != nil {
+			res.RemoteIDs = append(res.RemoteIDs, more.RemoteIDs...)
+		}
+		if err != nil {
+			return res, fmt.Errorf("instagram: post published, comment %d/%d failed: %w", len(res.RemoteIDs), len(req.Parts)-1, err)
+		}
+	}
+	return res, nil
+}
+
+// comments posts each text as a comment of the account on the media (POST /{ig-media-id}/comments,
+// instagram_business_manage_comments or instagram_manage_comments).
+func (ig *Instagram) comments(ctx context.Context, to string, texts []string) (*providers.PublishResult, error) {
+	res := &providers.PublishResult{}
+	for _, t := range texts {
+		if strings.TrimSpace(t) == "" {
+			return partial(res), providers.Invalid("instagram: empty comment")
+		}
+		var r idResp
+		if err := ig.g.post(ctx, "/"+to+"/comments", url.Values{"message": {t}}, &r); err != nil {
+			return partial(res), publishErr(err)
+		}
+		if r.ID == "" {
+			return partial(res), errors.New("instagram: empty comment id in response")
+		}
+		res.RemoteIDs = append(res.RemoteIDs, r.ID)
+	}
+	if len(res.RemoteIDs) > 0 {
+		res.RemoteID = res.RemoteIDs[0]
+	}
+	return res, nil
 }
 
 // insightMetrics lists the media insights valid for a surface (IG Media Insights reference, v22.0+:

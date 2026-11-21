@@ -463,7 +463,8 @@ function mock(pp, live) {
       pp.texts.forEach((t, i) => {
         const item = el("div", "mk-item");
         item.append(textEl(t, "mk-text", live));
-        if (i === 0 && pp.media.length) item.append(carousel(pp.media));
+        const pm = i === 0 ? pp.media : t.media || [];
+        if (pm.length) item.append(carousel(pm));
         m.append(item);
       });
       break;

@@ -35,6 +35,17 @@ func strs(desc string) map[string]any {
 }
 func num(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }
 
+// threadSchema: each part is a string, or an object with its own media.
+func threadSchema() map[string]any {
+	return map[string]any{"type": "array", "description": "Thread parts, instead of text. Each part is a string or {\"text\": \"...\", \"media\": [\"med_...\"]}. " +
+		"thread[0].media is the media of part 1 (do not also give the top-level media). Media on later parts: X (up to 4 images or 1 video/GIF per part) and Threads " +
+		"(image, video or carousel per part) only; on Facebook, Instagram and LinkedIn the later parts become text-only comments of the account on the post.",
+		"items": map[string]any{"anyOf": []any{
+			map[string]any{"type": "string"},
+			obj(map[string]any{"text": str("Part text"), "media": strs("Media ids of this part")}),
+		}}}
+}
+
 type sourceKey struct{}
 
 // WithSource tags a call with its origin (rest or mcp), recorded on feedback.
@@ -182,12 +193,15 @@ func BuildTools(svc *core.Service) []Tool {
 			Name: "schedule_post",
 			Description: "Schedule a post (or a thread) on one or several accounts. scheduled_at is RFC3339 with timezone (e.g. 2026-11-20T09:00:00+01:00); " +
 				"omit it or use 'now' to publish within 30 seconds, or 'draft' to keep it as a draft. A draft can carry planned_at, the time it is meant to go out: " +
-				"it shows in the owner's calendar and approve_post schedules it then. Use per_account to give a network its own text.",
+				"it shows in the owner's calendar and approve_post schedules it then. Use per_account to give a network its own text. " +
+				"Threads: on X and Threads each part is a reply to the previous one; on Facebook, Instagram and LinkedIn part 1 is the post and parts 2..n " +
+				"are published right after as comments of the account on it. Options: LinkedIn images_as_document (+ document_title) sends 2-300 images as one " +
+				"swipeable PDF document; Instagram trial_reel (+ trial_graduation MANUAL or SS_PERFORMANCE) publishes a Reel as a trial Reel.",
 			InputSchema: obj(map[string]any{
 				"account_ids":  strs("Target account ids"),
 				"text":         str("Post text"),
-				"thread":       strs("Thread parts, instead of text"),
-				"media":        strs("Media ids from upload_media_from_url"),
+				"thread":       threadSchema(),
+				"media":        strs("Media ids from upload_media_from_url (media of the first part)"),
 				"scheduled_at": str("RFC3339, 'now' or 'draft'"),
 				"planned_at":   str("Drafts only: intended publish time, RFC3339 with offset. Nothing is published until approve_post."),
 				"per_account":  map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "account id -> text override"},
@@ -266,7 +280,7 @@ func BuildTools(svc *core.Service) []Tool {
 			Name: "update_post",
 			Description: "Edit a draft, scheduled or failed post: text, thread, media, options, scheduled_at (RFC3339, 'now', 'draft') or planned_at (drafts only, RFC3339; '' or 'none' clears it). " +
 				"Rescheduling a failed post retries it. Moving a scheduled post back to 'draft' keeps its time as planned_at.",
-			InputSchema: obj(map[string]any{"id": str("Post id"), "text": str(""), "thread": strs(""), "media": strs(""), "scheduled_at": str(""), "planned_at": str("Drafts only: RFC3339, or '' / 'none' to clear"), "options": map[string]any{"type": "object"}}, "id"),
+			InputSchema: obj(map[string]any{"id": str("Post id"), "text": str(""), "thread": threadSchema(), "media": strs("Media of the first part"), "scheduled_at": str(""), "planned_at": str("Drafts only: RFC3339, or '' / 'none' to clear"), "options": map[string]any{"type": "object"}}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct {
 					ID string `json:"id"`
@@ -586,7 +600,7 @@ func BuildTools(svc *core.Service) []Tool {
 		{
 			Name:        "validate_post",
 			Description: "Pre-flight check of a post against each target network (character limits with X link weighting, media count and types, required title...). Same arguments as schedule_post; nothing is saved.",
-			InputSchema: obj(map[string]any{"account_ids": strs(""), "text": str(""), "thread": strs(""), "media": strs(""), "per_account": map[string]any{"type": "object"}, "options": map[string]any{"type": "object"}}, "account_ids"),
+			InputSchema: obj(map[string]any{"account_ids": strs(""), "text": str(""), "thread": threadSchema(), "media": strs(""), "per_account": map[string]any{"type": "object"}, "options": map[string]any{"type": "object"}}, "account_ids"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				in, err := decode[core.ScheduleInput](raw)
 				if err != nil {

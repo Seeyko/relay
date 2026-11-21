@@ -69,7 +69,9 @@ func init() {
 			"(w_organization_social, r_organization_social, rw_organization_admin). Posts as urn:li:organization:{organization_id}: " +
 			"text (3000 characters), one image or 2-20 images (JPEG/PNG/GIF), one MP4 video (options.title), one document " +
 			"(PDF/PPT/PPTX/DOC/DOCX, options.title), link/article (options.link, options.link_title, options.link_description, " +
-			"optional single image as thumbnail). Extra thread parts become comments of the page on the post. " +
+			"optional single image as thumbnail), images as a swipeable document carousel (options.images_as_document=true with 2 to 300 " +
+			"JPEG/PNG/GIF images: Relay builds a PDF, one page per image; options.document_title, default the first line of the text). " +
+			"Extra thread parts become comments of the page on the post (text only). " +
 			"Lifetime impressions/clicks/likes/comments/shares (organic, last 12 months), follower count, comments and replies " +
 			"(through /v2/socialActions), history import. Access tokens last 60 days and are renewed with the refresh token " +
 			"(365 days) when client_id/client_secret are given.",
@@ -154,6 +156,17 @@ func kindOf(m providers.MediaFile) mediaKind {
 	return kindUnknown
 }
 
+func optBool(o map[string]any, k string) bool {
+	switch v := o[k].(type) {
+	case bool:
+		return v
+	case string:
+		b, _ := strconv.ParseBool(v)
+		return b
+	}
+	return false
+}
+
 func validate(req providers.PublishRequest) []string {
 	var errs []string
 	first := ""
@@ -177,6 +190,29 @@ func validate(req providers.PublishRequest) []string {
 		if n := providers.CharCount(p); n > maxComment {
 			errs = append(errs, fmt.Sprintf("part %d becomes a LinkedIn comment, limited to %d characters (got %d)", i+1, maxComment, n))
 		}
+	}
+	asDoc := optBool(req.Options, "images_as_document")
+	if t, _ := req.Options["document_title"].(string); providers.CharCount(t) > providers.MaxDocumentTitle {
+		errs = append(errs, fmt.Sprintf("options.document_title is limited to %d characters (got %d)", providers.MaxDocumentTitle, providers.CharCount(t)))
+	}
+	if asDoc {
+		var size int64
+		for _, m := range req.Media {
+			size += m.Size
+			if kindOf(m) != kindImage {
+				errs = append(errs, fmt.Sprintf("options.images_as_document takes JPEG/PNG/GIF images only (%s is %s)", m.Filename, m.Mime))
+			}
+		}
+		if n := len(req.Media); n < minDocumentImages || n > maxDocumentImages {
+			errs = append(errs, fmt.Sprintf("options.images_as_document needs %d to %d images (got %d)", minDocumentImages, maxDocumentImages, n))
+		}
+		if size > maxDocument {
+			errs = append(errs, fmt.Sprintf("the images weigh %d MB: the PDF would exceed LinkedIn's 100 MB document limit", size>>20))
+		}
+		if link != "" {
+			errs = append(errs, "options.images_as_document cannot be combined with options.link")
+		}
+		return errs
 	}
 	var images, videos, docs int
 	for _, m := range req.Media {
@@ -709,6 +745,18 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 	if to, _ := req.Options["reply_to"].(string); to != "" {
 		return c.comments(ctx, to, req.Parts)
 	}
+	docTitle := ""
+	if optBool(req.Options, "images_as_document") {
+		if l, _ := req.Options["link"].(string); l != "" {
+			return nil, providers.Invalid("linkedin-page: images_as_document cannot be combined with a link")
+		}
+		doc, err := documentFromImages(req.Media)
+		if err != nil {
+			return nil, err
+		}
+		req.Media = []providers.MediaFile{doc}
+		docTitle = providers.DocumentTitle(req.Options, req.Parts)
+	}
 	if err := checkShape(req); err != nil {
 		return nil, err
 	}
@@ -767,6 +815,9 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 			media["altText"] = items[0].alt
 		case kind == kindDocument:
 			t := title
+			if docTitle != "" {
+				t = docTitle
+			}
 			if t == "" {
 				t = strings.TrimSuffix(req.Media[0].Filename, fileExt(req.Media[0].Filename))
 			}

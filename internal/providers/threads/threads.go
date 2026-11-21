@@ -52,12 +52,13 @@ func init() {
 		Name: "threads",
 		Description: "Threads profile via the Threads API (threads_basic, threads_content_publish, threads_manage_replies, " +
 			"threads_manage_insights). Text (500 characters, up to 5 links), image (JPEG/PNG), video (MP4/MOV), carousel (2 to 20 items), " +
-			"threads (each part is a reply to the previous one), options reply_to, quote_post_id, link_attachment (text posts), " +
+			"threads (each part is a reply to the previous one and can carry its own image, video or carousel), options reply_to, quote_post_id, link_attachment (text posts), " +
 			"reply_control, topic_tag, location_id, made_with_ai; views/likes/replies/reposts/quotes/shares insights; replies read + answer; " +
 			"history import; followers. Needs RELAY_BASE_URL reachable from the internet: Threads downloads the media from Relay. " +
 			"Long-lived token (60 days) is refreshed automatically.",
 		CredentialFields: []string{"access_token", "user_id"},
 		Validate:         validate,
+		MediaPerPart:     true,
 		New: func(c map[string]string, persist func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			if c["access_token"] == "" {
 				return nil, errors.New("threads: access_token is required")
@@ -142,12 +143,13 @@ func validate(req providers.PublishRequest) []string {
 		if n := len(linkRe.FindAllString(p, -1)); n > maxLinks {
 			errs = append(errs, fmt.Sprintf("Threads posts take at most %d links (part %d has %d)", maxLinks, i+1, n))
 		}
-		if strings.TrimSpace(p) == "" && !(i == 0 && len(req.Media) > 0) {
+		if strings.TrimSpace(p) == "" && len(req.MediaOf(i)) == 0 {
 			errs = append(errs, fmt.Sprintf("Threads part %d is empty", i+1))
 		}
 	}
-	if len(req.Media) > maxCarousel {
-		errs = append(errs, fmt.Sprintf("Threads carousels take at most %d media (got %d)", maxCarousel, len(req.Media)))
+	errs = append(errs, validateMedia(req.Media, "")...)
+	for i := 1; i < len(req.Parts); i++ {
+		errs = append(errs, validateMedia(req.MediaOf(i), fmt.Sprintf("part %d: ", i+1))...)
 	}
 	if optString(req.Options, "link_attachment") != "" && len(req.Media) > 0 {
 		errs = append(errs, "Threads options.link_attachment only works on text posts (no media)")
@@ -160,7 +162,16 @@ func validate(req providers.PublishRequest) []string {
 			errs = append(errs, "Threads options.topic_tag must be 1 to 50 characters, without periods or ampersands")
 		}
 	}
-	for _, m := range req.Media {
+	return errs
+}
+
+// validateMedia checks the media of one post: one image or video, or a carousel of up to 20 items.
+func validateMedia(list []providers.MediaFile, prefix string) []string {
+	var errs []string
+	if len(list) > maxCarousel {
+		errs = append(errs, fmt.Sprintf("Threads carousels take at most %d media (got %d)", maxCarousel, len(list)))
+	}
+	for _, m := range list {
 		if isVideo(m) {
 			if m.Mime != "video/mp4" && m.Mime != "video/quicktime" {
 				errs = append(errs, "Threads videos must be MP4 or MOV ("+m.Filename+" is "+m.Mime+")")
@@ -181,6 +192,9 @@ func validate(req providers.PublishRequest) []string {
 		if n := providers.CharCount(m.Alt); n > maxAltText {
 			errs = append(errs, fmt.Sprintf("Threads alt text is limited to %d characters (got %d)", maxAltText, n))
 		}
+	}
+	for i := range errs {
+		errs[i] = prefix + errs[i]
 	}
 	return errs
 }
@@ -477,7 +491,9 @@ func (c *Client) permalink(ctx context.Context, id string) string {
 }
 
 // Publish posts one Threads post or a chain: each part after the first replies to the previous one.
-// Media go on the first part. options.reply_to makes the first part a reply to an existing post.
+// Each part carries its own media (req.MediaOf). options.reply_to makes the first part a reply to an
+// existing post; with options.thread_root (a resumed thread) the first part is not the thread's first post,
+// so the first-post-only options (link_attachment, quote_post_id) are not sent again.
 func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*providers.PublishResult, error) {
 	c.maybeRefresh(ctx)
 	parts := req.Parts
@@ -497,13 +513,10 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 		return nil, err
 	}
 	replyTo := optString(req.Options, "reply_to")
+	resumed := optString(req.Options, "thread_root") != ""
 	res := &providers.PublishResult{}
 	for i, text := range parts {
-		var media []providers.MediaFile
-		if i == 0 {
-			media = req.Media
-		}
-		id, err := c.createPart(ctx, uid, text, media, replyTo, req.Options, i == 0)
+		id, err := c.createPart(ctx, uid, text, req.MediaOf(i), replyTo, req.Options, i == 0 && !resumed)
 		if err == nil {
 			id, err = c.publish(ctx, uid, id)
 		}
