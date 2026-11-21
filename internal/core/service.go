@@ -145,6 +145,7 @@ func (s *Service) UpdateCredentials(ctx context.Context, accountID string, field
 	if err := s.Store.UpdateAccount(ctx, acc); err != nil {
 		return nil, err
 	}
+	s.recordSync(ctx, acc.ID, nil)
 	s.Log.Info("account credentials updated", "account", acc.ID, "provider", acc.Provider, "fields", len(fields))
 	return acc, nil
 }
@@ -766,6 +767,7 @@ func (s *Service) refreshMetrics(ctx context.Context, accountID string, since ti
 			}
 		}
 		m, err := cl.Metrics(ctx, ids)
+		s.recordSync(ctx, acc.ID, err)
 		if err != nil && !errors.Is(err, providers.ErrUnsupported) {
 			errs = append(errs, fmt.Errorf("%s: %w", acc.ID, err))
 		}
@@ -1102,10 +1104,22 @@ func (s *Service) SnapshotAccount(ctx context.Context, a *store.Account) (map[st
 		return nil, providers.ErrUnsupported
 	}
 	m, err := st.AccountMetrics(ctx)
+	s.recordSync(ctx, a.ID, err)
 	if err != nil {
 		return nil, err
 	}
 	return m, s.Store.AddAccountSnapshot(ctx, a.ID, s.now(), m)
+}
+
+// recordSync keeps the last successful network call and the last failure of an account, for the dashboard.
+// ErrUnsupported is not a failure.
+func (s *Service) recordSync(ctx context.Context, accountID string, err error) {
+	if errors.Is(err, providers.ErrUnsupported) {
+		return
+	}
+	if rerr := s.Store.RecordSync(ctx, accountID, s.now(), err); rerr != nil {
+		s.Log.Warn("record sync status", "account", accountID, "err", rerr)
+	}
 }
 
 // ---------- media ----------
