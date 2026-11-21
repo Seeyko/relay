@@ -257,6 +257,46 @@ func TestInstagramMetrics(t *testing.T) {
 	}
 }
 
+// One unsupported metric fails the whole insights call: the narrower list must still bring shares and saves.
+func TestInstagramMetricsNarrowerFallback(t *testing.T) {
+	f := newFakeIG(t, map[string]func(url.Values) string{
+		"GET /v26.0/m1": static(`{"like_count":3,"comments_count":1,"media_product_type":"FEED"}`),
+		"GET /v26.0/m1/insights": func(q url.Values) string {
+			if q.Get("metric") != "views,reach,saved,shares" {
+				return `400 {"error":{"message":"(#100) metric[5] must be one of the following values: views, reach, saved, shares","code":100}}`
+			}
+			return `{"data":[{"name":"views","values":[{"value":90}]},{"name":"reach","values":[{"value":60}]},{"name":"saved","values":[{"value":2}]},{"name":"shares","values":[{"value":5}]}]}`
+		},
+	})
+	ig := newTestIG(t, f, nil, nil)
+	got, err := ig.Metrics(context.Background(), []string{"m1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := got["m1"]; m["views"] != 90 || m["shares"] != 5 || m["saved"] != 2 || m["like_count"] != 3 {
+		t.Fatalf("m1 %v", m)
+	}
+}
+
+// A token without the insights permission used to store likes and comments in silence: the error must surface.
+func TestInstagramMetricsNoInsightsPermission(t *testing.T) {
+	denied := static(`400 {"error":{"message":"(#10) Application does not have permission for this action","code":10}}`)
+	f := newFakeIG(t, map[string]func(url.Values) string{
+		"GET /v26.0/m1":          static(`{"like_count":10,"comments_count":2,"media_product_type":"REELS"}`),
+		"GET /v26.0/m1/insights": denied,
+		"GET /v26.0/m2":          static(`{"like_count":4,"comments_count":0,"media_product_type":"FEED"}`),
+		"GET /v26.0/m2/insights": denied,
+	})
+	ig := newTestIG(t, f, nil, nil)
+	got, err := ig.Metrics(context.Background(), []string{"m1", "m2"})
+	if err == nil || !strings.Contains(err.Error(), "insights") || !strings.Contains(err.Error(), "permission") {
+		t.Fatalf("want an insights error, got %v", err)
+	}
+	if got["m1"]["like_count"] != 10 || got["m2"]["like_count"] != 4 {
+		t.Fatalf("likes and comments must still be returned: %v", got)
+	}
+}
+
 func TestInstagramCommentsAndReply(t *testing.T) {
 	f := newFakeIG(t, map[string]func(url.Values) string{
 		"GET /v26.0/m1/comments": func(q url.Values) string {

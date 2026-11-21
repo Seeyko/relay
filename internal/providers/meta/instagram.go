@@ -634,9 +634,24 @@ type igInsights struct {
 	} `json:"data"`
 }
 
+// insightFallbacks are tried in order: one metric the media does not support fails the whole insights
+// call, so a narrower list still brings back views, reach, shares and saves.
+func insightFallbacks(product string) []string {
+	if product == "STORY" {
+		return []string{insightMetrics(product), "views,reach,shares", "views,reach"}
+	}
+	return []string{insightMetrics(product), "views,reach,saved,shares", "views,reach"}
+}
+
+// Metrics returns likes and comments of each media plus its insights (views, reach, saved, shares...).
+// Insights are best effort per media (a recent or small media can have none), but when no media of the
+// batch gets any, the token most likely lacks the insights permission: the Graph error is returned with
+// the like and comment counts, so refresh_metrics reports it instead of storing two counters in silence.
 func (ig *Instagram) Metrics(ctx context.Context, ids []string) (map[string]map[string]int64, error) {
 	ig.maybeRefresh(ctx)
 	out := map[string]map[string]int64{}
+	var insErr error
+	withInsights := 0
 	for _, id := range ids {
 		var r struct {
 			LikeCount     int64  `json:"like_count"`
@@ -647,13 +662,15 @@ func (ig *Instagram) Metrics(ctx context.Context, ids []string) (map[string]map[
 			return out, err
 		}
 		m := map[string]int64{"like_count": r.LikeCount, "reply_count": r.CommentsCount}
-		// Insights are best effort: one unsupported metric fails the whole call, so fall back to the core pair.
-		var ins igInsights
-		err := ig.g.get(ctx, "/"+id+"/insights", url.Values{"metric": {insightMetrics(r.ProductType)}}, &ins)
-		if err != nil {
-			err = ig.g.get(ctx, "/"+id+"/insights", url.Values{"metric": {"views,reach"}}, &ins)
-		}
-		if err == nil {
+		for _, metrics := range insightFallbacks(r.ProductType) {
+			var ins igInsights
+			err := ig.g.get(ctx, "/"+id+"/insights", url.Values{"metric": {metrics}}, &ins)
+			if err != nil {
+				if insErr == nil {
+					insErr = err
+				}
+				continue
+			}
 			for _, d := range ins.Data {
 				switch {
 				case d.TotalValue != nil:
@@ -662,8 +679,14 @@ func (ig *Instagram) Metrics(ctx context.Context, ids []string) (map[string]map[
 					m[d.Name] = d.Values[0].Value
 				}
 			}
+			withInsights++
+			break
 		}
 		out[id] = m
+	}
+	if len(ids) > 0 && withInsights == 0 && insErr != nil {
+		return out, fmt.Errorf("instagram: no insights (views, reach, shares, saved) for any of %d media, only likes and comments were stored; "+
+			"the token needs instagram_business_manage_insights (Instagram Login) or instagram_manage_insights (login=facebook): %w", len(ids), insErr)
 	}
 	return out, nil
 }
