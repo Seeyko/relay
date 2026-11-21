@@ -1051,7 +1051,7 @@ func TestTikTok(t *testing.T) {
 		t.Fatalf("%d %s", code, page)
 	}
 	q := h.lastAuth()
-	if q.Get("client_key") != "tk-key" || q.Get("client_id") != "" || q.Get("scope") != "user.info.basic,user.info.profile,user.info.stats,video.publish,video.list" {
+	if q.Get("client_key") != "tk-key" || q.Get("client_id") != "" || q.Get("scope") != "user.info.basic,user.info.profile,user.info.stats,video.publish,video.upload,video.list" {
 		t.Fatalf("authorization request = %v", q)
 	}
 	accs := h.accounts()
