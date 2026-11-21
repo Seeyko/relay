@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Seeyko/relay/internal/providers"
@@ -25,8 +26,8 @@ const (
 	fbChunkedVideo = 64 << 20
 	// /{page-id}/posts and comment edges accept at most 100 items per page.
 	fbPageSize = "100"
-	// The ?ids= batch read accepts up to 50 ids.
-	fbIDsBatch = 50
+	// Parallel object reads in Metrics (one GET per post since v26.0 dropped ?ids=).
+	fbConcurrency = 5
 )
 
 var fbPhotoMimes = map[string]bool{"image/jpeg": true, "image/jpg": true, "image/png": true, "image/gif": true, "image/bmp": true, "image/tiff": true}
@@ -401,22 +402,56 @@ func (f *Facebook) Metrics(ctx context.Context, ids []string) (map[string]map[st
 	return out, nil
 }
 
-// batch runs GET /?ids=...&fields=... in chunks of 50 and lets fill decode each object.
+// batch reads each object with GET /{id}?fields=... (Graph v26.0 removed the ?ids= batch read)
+// and lets fill decode it. Up to fbConcurrency reads run at once. An object the API refuses
+// with a 4xx (deleted post, missing permission on one item) is skipped so one bad id does not
+// hide the metrics of every other post; the first other error is returned.
 func (f *Facebook) batch(ctx context.Context, ids []string, fields string, out map[string]map[string]int64, fill func(json.RawMessage, map[string]int64)) error {
-	for start := 0; start < len(ids); start += fbIDsBatch {
-		end := min(start+fbIDsBatch, len(ids))
-		var r map[string]json.RawMessage
-		if err := f.g.get(ctx, "/", url.Values{"ids": {strings.Join(ids[start:end], ",")}, "fields": {fields}}, &r); err != nil {
-			return err
-		}
-		for id, v := range r {
-			if out[id] == nil {
-				out[id] = map[string]int64{}
-			}
-			fill(v, out[id])
-		}
+	type res struct {
+		id  string
+		v   json.RawMessage
+		err error
 	}
-	return nil
+	jobs := make(chan string)
+	results := make(chan res)
+	var wg sync.WaitGroup
+	for w := 0; w < min(fbConcurrency, len(ids)); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range jobs {
+				var v json.RawMessage
+				err := f.g.get(ctx, "/"+id, url.Values{"fields": {fields}}, &v)
+				results <- res{id, v, err}
+			}
+		}()
+	}
+	go func() {
+		for _, id := range ids {
+			jobs <- id
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+	var first error
+	for r := range results {
+		if r.err != nil {
+			var he *providers.HTTPError
+			if errors.As(r.err, &he) && he.Status >= 400 && he.Status < 500 && he.Status != 401 && he.Status != 429 {
+				continue
+			}
+			if first == nil {
+				first = r.err
+			}
+			continue
+		}
+		if out[r.id] == nil {
+			out[r.id] = map[string]int64{}
+		}
+		fill(r.v, out[r.id])
+	}
+	return first
 }
 
 func addInsights(in fbInsights, names map[string]string, m map[string]int64) {

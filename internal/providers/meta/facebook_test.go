@@ -214,30 +214,48 @@ func TestFacebookPublishReel(t *testing.T) {
 }
 
 func TestFacebookMetrics(t *testing.T) {
+	// Graph v26.0 rejects the ?ids= batch read, so every object is read with GET /{id}.
+	objects := map[string]map[string]string{
+		"/v26.0/123_1": {
+			"reactions.limit(0).summary(true),comments.limit(0).summary(true),shares":                    `{"id":"123_1","reactions":{"data":[],"summary":{"total_count":5}},"comments":{"data":[],"summary":{"total_count":2}},"shares":{"count":1}}`,
+			"insights.metric(post_media_view,post_total_media_view_unique,post_clicks).period(lifetime)": `{"insights":{"data":[{"name":"post_media_view","period":"lifetime","values":[{"value":100}]},{"name":"post_total_media_view_unique","period":"lifetime","values":[{"value":80}]},{"name":"post_clicks","period":"lifetime","values":[{"value":7}]}]}}`,
+		},
+		"/v26.0/123_2": {
+			"reactions.limit(0).summary(true),comments.limit(0).summary(true),shares":                    `{"id":"123_2","reactions":{"summary":{"total_count":0}}}`,
+			"insights.metric(post_media_view,post_total_media_view_unique,post_clicks).period(lifetime)": `{}`,
+		},
+		"/v26.0/v9": {
+			"likes.limit(0).summary(true),comments.limit(0).summary(true)": `{"likes":{"summary":{"total_count":3}},"comments":{"summary":{"total_count":4}}}`,
+		},
+	}
 	fb := newFB(t, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if r.URL.Path != "/v26.0/" {
-			t.Errorf("unexpected %s", r.URL.Path)
+		if q.Has("ids") {
+			w.WriteHeader(400)
+			w.Write([]byte(`{"error":{"message":"The ids query parameter is deprecated in v26.0+.","code":100}}`))
+			return
 		}
-		switch q.Get("fields") {
-		case "reactions.limit(0).summary(true),comments.limit(0).summary(true),shares":
-			if q.Get("ids") != "123_1,123_2" {
-				t.Errorf("ids %q", q.Get("ids"))
-			}
-			w.Write([]byte(`{"123_1":{"id":"123_1","reactions":{"data":[],"summary":{"total_count":5}},"comments":{"data":[],"summary":{"total_count":2}},"shares":{"count":1}},"123_2":{"id":"123_2","reactions":{"summary":{"total_count":0}}}}`))
-		case "likes.limit(0).summary(true),comments.limit(0).summary(true)":
-			w.Write([]byte(`{"v9":{"likes":{"summary":{"total_count":3}},"comments":{"summary":{"total_count":4}}}}`))
-		case "insights.metric(post_media_view,post_total_media_view_unique,post_clicks).period(lifetime)":
-			w.Write([]byte(`{"123_1":{"insights":{"data":[{"name":"post_media_view","period":"lifetime","values":[{"value":100}]},{"name":"post_total_media_view_unique","period":"lifetime","values":[{"value":80}]},{"name":"post_clicks","period":"lifetime","values":[{"value":7}]}]}}}`))
-		case "video_insights.metric(total_video_views).period(lifetime)":
+		if r.URL.Path == "/v26.0/123_gone" {
+			// A deleted post must not hide the metrics of the others.
+			w.WriteHeader(400)
+			w.Write([]byte(`{"error":{"message":"Unsupported get request","code":100}}`))
+			return
+		}
+		if q.Get("fields") == "video_insights.metric(total_video_views).period(lifetime)" {
 			// Missing read_insights must not break engagement metrics.
 			w.WriteHeader(403)
 			w.Write([]byte(`{"error":{"message":"(#10) permission","code":10}}`))
-		default:
-			t.Errorf("fields %q", q.Get("fields"))
+			return
 		}
+		body, ok := objects[r.URL.Path][q.Get("fields")]
+		if !ok {
+			t.Errorf("unexpected %s fields=%q", r.URL.Path, q.Get("fields"))
+			w.WriteHeader(500)
+			return
+		}
+		w.Write([]byte(body))
 	})
-	m, err := fb.Metrics(context.Background(), []string{"123_1", "v9", "123_2"})
+	m, err := fb.Metrics(context.Background(), []string{"123_1", "v9", "123_2", "123_gone"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +326,7 @@ func TestFacebookHistoryKindsAndAccount(t *testing.T) {
 				{"id":"123_4","created_time":"2026-01-02T03:04:05+0000","status_type":"added_video","attachments":{"data":[{"type":"video_inline","media_type":"video"}]}},
 				{"id":"123_5","created_time":"2026-01-02T03:04:05+0000","status_type":"shared_story","attachments":{"data":[{"type":"share","media_type":"link"}]}}
 			],"paging":{"cursors":{"after":"A"}}}`))
-		case "/v26.0/":
+		case "/v26.0/123_1", "/v26.0/123_2", "/v26.0/123_3", "/v26.0/123_4", "/v26.0/123_5":
 			w.Write([]byte(`{}`))
 		case "/v26.0/123":
 			if q.Get("fields") != "fan_count,followers_count" {
