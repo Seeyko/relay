@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Seeyko/relay/internal/core"
@@ -32,6 +34,28 @@ func strs(desc string) map[string]any {
 	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
 }
 func num(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }
+
+// list decodes a JSON array of strings or a comma separated string (REST query strings).
+type list []string
+
+func (l *list) UnmarshalJSON(b []byte) error {
+	var arr []string
+	if err := json.Unmarshal(b, &arr); err == nil {
+		*l = arr
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("expected a list of strings or a comma separated string")
+	}
+	*l = nil
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			*l = append(*l, p)
+		}
+	}
+	return nil
+}
 
 func decode[T any](raw json.RawMessage) (T, error) {
 	var v T
@@ -267,38 +291,83 @@ func BuildTools(svc *core.Service) []Tool {
 		},
 		{
 			Name: "analyze",
-			Description: "Analyse performance across all networks with normalized metrics (views, likes, comments, shares, saves, engagement, engagement_rate). " +
-				"Returns totals vs the previous period of the same length, top and bottom posts, and optional groups. " +
-				"group_by: network, account, day, week, month, weekday, hour, format (text/thread/reply/image/video/carousel/article), length, hashtag, has_link. " +
-				"Use it to find what works: best hours, best formats, best networks. Reposts are excluded by default.",
+			Description: "Answer analytics questions across networks with normalized metrics (views, likes, comments, shares, saves, engagement, engagement_rate). " +
+				"Examples: views on every network except X last month -> {period:\"last_month\", exclude_providers:[\"x\"], metric:\"views\"}; " +
+				"likes per network per week this quarter -> {period:\"this_quarter\", group_by:\"network,week\", metric:\"likes\"}; " +
+				"best Instagram and TikTok videos with #skatepark this year -> {period:\"this_year\", providers:[\"instagram\",\"tiktok\"], formats:[\"video\",\"reel\"], hashtags:[\"skatepark\"], metric:\"views\", top:10}. " +
+				"Period: period (named) or since/until (RFC 3339, a date 2026-10-01 in the instance timezone, or a duration ago like 720h; until is exclusive); default last 30 days. " +
+				"Filters (AND between fields, OR inside a list; lists may also be comma separated strings): providers, exclude_providers, account_ids, exclude_account_ids, " +
+				"formats, exclude_formats (text, thread, reply, image, video, carousel, reel, story, short, article, document, quote, repost...), hashtags (any of), text_contains, has_link, has_media. " +
+				"basis: published (default: posts published in the period, lifetime counters) or activity (what all posts gained during the period, from hourly/daily snapshots; " +
+				"only counts posts Relay was already measuring at the start). compare: previous (default), previous_year or none. " +
+				"group_by: one or several comma separated of network, account, day, week, month, weekday, hour, format, length, hashtag, has_link. " +
+				"Returns totals, change vs the comparison period, groups (avg/median of metric, totals, engagement rate), top and bottom posts, and notes. Reposts are excluded unless include_reposts.",
 			InputSchema: obj(map[string]any{
-				"since": str("RFC3339 or duration like 720h (default 30 days)"), "until": str("RFC3339, default now"),
-				"account_id": str(""), "provider": str("x, threads, tiktok, youtube, instagram, facebook, website"),
+				"period": str("One of " + strings.Join(core.Periods, ", ") + " (calendar periods use the instance timezone, weeks start Monday)"),
+				"since":  str("RFC 3339, date 2006-01-02 or duration ago like 720h"), "until": str("Same formats, exclusive, default now"),
+				"providers": strs("Only these networks: x, threads, tiktok, youtube, instagram, facebook, linkedin-page, website"), "exclude_providers": strs("All networks except these"),
+				"account_ids": strs("Only these accounts"), "exclude_account_ids": strs("All accounts except these"),
+				"formats": strs("Only these formats"), "exclude_formats": strs("Exclude these formats"),
+				"hashtags": strs("Posts with any of these hashtags"), "text_contains": str("Case-insensitive text search"),
+				"has_link": map[string]any{"type": "boolean"}, "has_media": map[string]any{"type": "boolean"},
+				"basis": str("published (default) or activity"), "compare": str("previous (default), previous_year or none"),
+				"account_id": str("Deprecated: use account_ids"), "provider": str("Deprecated: use providers"),
 				"group_by": str("see description"), "metric": str("views | likes | comments | shares | saves | engagement | engagement_rate | any raw key; default engagement"),
 				"top": num("top/bottom posts to return, default 5"), "include_reposts": map[string]any{"type": "boolean"},
 			}),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct {
-					Since          string `json:"since"`
-					Until          string `json:"until"`
-					AccountID      string `json:"account_id"`
-					Provider       string `json:"provider"`
-					GroupBy        string `json:"group_by"`
-					Metric         string `json:"metric"`
-					Top            int    `json:"top"`
-					IncludeReposts bool   `json:"include_reposts"`
+					Period            string `json:"period"`
+					Since             string `json:"since"`
+					Until             string `json:"until"`
+					AccountID         string `json:"account_id"`
+					Provider          string `json:"provider"`
+					Providers         list   `json:"providers"`
+					ExcludeProviders  list   `json:"exclude_providers"`
+					AccountIDs        list   `json:"account_ids"`
+					ExcludeAccountIDs list   `json:"exclude_account_ids"`
+					Formats           list   `json:"formats"`
+					ExcludeFormats    list   `json:"exclude_formats"`
+					Hashtags          list   `json:"hashtags"`
+					TextContains      string `json:"text_contains"`
+					HasLink           *bool  `json:"has_link"`
+					HasMedia          *bool  `json:"has_media"`
+					Basis             string `json:"basis"`
+					Compare           string `json:"compare"`
+					GroupBy           string `json:"group_by"`
+					Metric            string `json:"metric"`
+					Top               int    `json:"top"`
+					IncludeReposts    bool   `json:"include_reposts"`
 				}](raw)
 				if err != nil {
 					return nil, err
 				}
-				since, err := parseSince(a.Since, 30*24*time.Hour)
-				if err != nil {
-					return nil, &core.ErrInvalid{Msg: "since: " + err.Error()}
+				now := time.Now().UTC()
+				if svc.Now != nil {
+					now = svc.Now()
 				}
-				in := core.AnalyzeInput{Since: since, AccountID: a.AccountID, Provider: a.Provider, GroupBy: a.GroupBy, Metric: a.Metric, Top: a.Top, IncludeReposts: a.IncludeReposts, Location: svc.Location}
-				if a.Until != "" {
-					if in.Until, err = time.Parse(time.RFC3339, a.Until); err != nil {
-						return nil, &core.ErrInvalid{Msg: "until: " + err.Error()}
+				in := core.AnalyzeInput{AccountID: a.AccountID, Provider: a.Provider, GroupBy: a.GroupBy, Metric: a.Metric, Top: a.Top, IncludeReposts: a.IncludeReposts,
+					Location: svc.Location, Basis: a.Basis, Compare: a.Compare,
+					Filter: core.Filter{Providers: a.Providers, ExcludeProviders: a.ExcludeProviders, AccountIDs: a.AccountIDs, ExcludeAccountIDs: a.ExcludeAccountIDs,
+						Formats: a.Formats, ExcludeFormats: a.ExcludeFormats, Hashtags: a.Hashtags, TextContains: a.TextContains, HasLink: a.HasLink, HasMedia: a.HasMedia}}
+				if a.Period != "" {
+					if a.Since != "" || a.Until != "" {
+						return nil, &core.ErrInvalid{Msg: "use period or since/until, not both"}
+					}
+					if in.Since, in.Until, err = core.ResolvePeriod(a.Period, now, svc.Location); err != nil {
+						return nil, err
+					}
+				} else {
+					in.Since = now.Add(-30 * 24 * time.Hour)
+					if a.Since != "" {
+						if in.Since, err = core.ParseTime(a.Since, now, svc.Location); err != nil {
+							return nil, &core.ErrInvalid{Msg: "since: " + err.Error()}
+						}
+					}
+					if a.Until != "" {
+						if in.Until, err = core.ParseTime(a.Until, now, svc.Location); err != nil {
+							return nil, &core.ErrInvalid{Msg: "until: " + err.Error()}
+						}
 					}
 				}
 				return svc.Analyze(ctx, in)

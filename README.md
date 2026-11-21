@@ -8,7 +8,9 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 - Publish on time (built-in scheduler, automatic retries on temporary errors)
 - **Analytics agents can act on**: metric snapshots over time (growth curves at 1h / 24h / 7d), follower growth,
   normalized metrics across networks (views, likes, comments, shares, saves, engagement rate), comparisons with
-  the previous period, breakdowns by network, hour, weekday, format or hashtag, and read-only SQL
+  the previous period or the previous year, breakdowns by network, hour, weekday, format or hashtag (or two of them,
+  e.g. network × month), named periods (`last_month`, `this_quarter`...), filters (include or exclude networks,
+  accounts and formats, hashtags, text, links, media), "what happened during the period" from snapshots, and read-only SQL
 - Read and reply to comments
 - Pre-flight validation (character limits, media rules) and a **drafts-only API key** for sub-agents
 - Import an account's history (build a "my content" archive)
@@ -156,6 +158,31 @@ curl -X POST https://<your-host>/v1/posts \
 `scheduled_at` is RFC 3339 with an offset, `now` (or omitted) to publish within one tick, or `draft`.
 `per_account` gives an account its own text; `options` carries network settings (`reply_to`, `title`, `tags`,
 `media_type`, `link`...).
+
+## Analytics queries
+
+`analyze` (MCP) and `GET /v1/analytics` (REST, same arguments as query parameters, lists comma separated) answer
+questions like these:
+
+| Question | Arguments |
+| --- | --- |
+| Views on every network except X last month | `period=last_month&exclude_providers=x&metric=views` |
+| Likes per network per week this quarter | `period=this_quarter&group_by=network,week&metric=likes` |
+| Best Instagram and TikTok videos with #skatepark this year | `period=this_year&providers=instagram,tiktok&formats=video,reel&hashtags=skatepark&metric=views&top=10` |
+| October vs October last year on LinkedIn | `since=2026-10-01&until=2026-11-01&providers=linkedin-page&compare=previous_year` |
+| Views gained by all posts (old ones too) during last week | `period=last_week&basis=activity&metric=views` |
+
+- **Period**: `period` (`today`, `yesterday`, `this_week`, `last_week`, `this_month`, `last_month`, `this_quarter`,
+  `last_quarter`, `this_year`, `last_year`, `last_7d`, `last_14d`, `last_30d`, `last_90d`, `last_365d`, `all`) or
+  `since`/`until` (RFC 3339, a date, or a duration ago such as `720h`; `until` is exclusive). Calendar periods use
+  `RELAY_TIMEZONE`, weeks start on Monday. Default: the last 30 days.
+- **Filters**: `providers`, `exclude_providers`, `account_ids`, `exclude_account_ids`, `formats`, `exclude_formats`,
+  `hashtags` (any of), `text_contains`, `has_link`, `has_media`, `include_reposts`. AND between fields, OR inside a list.
+  The applied filters are echoed in `filters`.
+- **basis**: `published` (default) counts the posts published in the period with their lifetime counters.
+  `activity` counts what every post gained during the period, from the metric snapshots; posts Relay was not yet
+  measuring at the start are left out and reported in `notes`.
+- **compare**: `previous` (default, the period just before, same length), `previous_year` or `none`.
 
 ## Webhooks
 
