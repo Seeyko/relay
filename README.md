@@ -14,7 +14,9 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 - Read and reply to comments
 - Pre-flight validation (character limits, media rules) and a **drafts-only API key** for sub-agents
 - Import an account's history (build a "my content" archive)
-- Signed webhooks (`post.scheduled`, `post.published`, `post.failed`, `comment.new`)
+- Signed webhooks (`post.scheduled`, `post.published`, `post.failed`, `comment.new`, `feedback.new`, `feedback.updated`)
+- **Agent feedback loop**: when a user asks for something Relay cannot do, the agent files it with `submit_feedback`
+  (full text + screenshots); maintainer agents read open feedback and open pull requests
 - A task queue for a local browser agent, for networks without a usable API
 - A small open protocol to plug in **any website** as a channel ([Relay Site Protocol](docs/SITE_PROTOCOL.md))
 
@@ -147,6 +149,9 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | GET / POST | `/v1/media` | list / upload (multipart `file` or JSON `{"url"}`) |
 | GET / POST | `/v1/agent/tasks` | `list_browser_tasks` / `create_browser_task` |
 | POST | `/v1/agent/tasks/claim`, `/v1/agent/tasks/{id}/result` | used by the browser agent |
+| POST | `/v1/feedback` | `submit_feedback` |
+| GET | `/v1/feedback`, `/v1/feedback/{id}` | `list_feedback` (admin) / `get_feedback` |
+| PATCH | `/v1/feedback/{id}` | `update_feedback` (admin) |
 | POST | `/v1/tools/{name}` | any tool, JSON arguments |
 
 ```bash
@@ -183,6 +188,24 @@ questions like these:
   `activity` counts what every post gained during the period, from the metric snapshots; posts Relay was not yet
   measuring at the start are left out and reported in `notes`.
 - **compare**: `previous` (default, the period just before, same length), `previous_year` or `none`.
+
+## Feedback from agents
+
+Agents hit limits: a filter that does not exist, a network option Relay does not send, a bug. The MCP instructions
+tell them to call `submit_feedback` instead of giving up:
+
+```json
+{"kind": "missing_feature", "title": "Filter analyze by language",
+ "body": "User asked: views of English posts only. analyze has no language filter; text_contains is not enough.",
+ "media_urls": ["https://example.com/screenshot.png"], "context": {"tool": "analyze"}}
+```
+
+`kind` is `missing_feature` (default), `bug`, `improvement` or `other`. `media` takes media ids (upload first with
+`POST /v1/media` or `upload_media_from_url`), `media_urls` makes Relay download them; at most 10. Drafts-only keys can
+submit and read their own feedback by id.
+
+Maintainer agents (admin key) poll `list_feedback` (or listen to the `feedback.new` webhook), move each item through
+`open → triaged → in_progress → done | rejected | duplicate` with `update_feedback`, and attach the pull request URL.
 
 ## Webhooks
 

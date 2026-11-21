@@ -106,6 +106,12 @@ func (a *API) Handler() http.Handler {
 	})
 	authed.HandleFunc("POST /v1/media", a.uploadMedia)
 
+	// Feedback: agents ask for missing capabilities, maintainer agents turn them into PRs.
+	authed.HandleFunc("POST /v1/feedback", a.tool("submit_feedback", nil))
+	authed.HandleFunc("GET /v1/feedback", a.tool("list_feedback", nil))
+	authed.HandleFunc("GET /v1/feedback/{id}", a.tool("get_feedback", map[string]string{"id": "id"}))
+	authed.HandleFunc("PATCH /v1/feedback/{id}", a.tool("update_feedback", map[string]string{"id": "id"}))
+
 	// Browser agent (runs on the owner's computer, pulls work).
 	authed.HandleFunc("GET /v1/agent/tasks", a.tool("list_browser_tasks", nil))
 	authed.HandleFunc("POST /v1/agent/tasks", a.tool("create_browser_task", nil))
@@ -221,7 +227,7 @@ func (a *API) tool(name string, pathArgs map[string]string) http.HandlerFunc {
 			args[arg] = r.PathValue(p)
 		}
 		raw, _ := json.Marshal(args)
-		a.call(w, r, name, raw)
+		a.call(w, r.WithContext(mcp.WithSource(r.Context(), "rest")), name, raw)
 	}
 }
 
