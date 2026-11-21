@@ -41,7 +41,7 @@ func init() {
 		Name: "tiktok",
 		Description: "TikTok via the Content Posting API (direct post) and Display API. Scopes: user.info.basic, user.info.profile, user.info.stats, " +
 			"video.publish, video.list. One video (MP4/MOV/WebM, max 4 GB) or 1-35 JPEG/WebP images (options.media_type=PHOTO; TikTok pulls them " +
-			"from RELAY_BASE_URL, which must be a domain or URL prefix verified in your TikTok app). Required option: privacy_level " +
+			"from RELAY_BASE_URL, which must be a domain or URL prefix verified in your TikTok app). posting_mode=inbox sends the media to the creator's TikTok inbox instead (video.upload scope, works for unaudited apps; the creator publishes in the app within 24 h; privacy and interactions are chosen there). Required option for direct posting: privacy_level " +
 			"(PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, FOLLOWER_OF_CREATOR or SELF_ONLY; TikTok forbids a default, ask the creator). " +
 			"Interactions are off unless enabled: disable_comment, disable_duet, disable_stitch default to true. Other options: title (photo, max 90), " +
 			"is_aigc, brand_organic_toggle (your brand), brand_content_toggle (paid partnership, not with SELF_ONLY), auto_add_music, " +
@@ -86,7 +86,13 @@ func validate(req providers.PublishRequest) []string {
 	text := strings.Join(req.Parts, "\n\n")
 	o := req.Options
 	privacy, _ := o["privacy_level"].(string)
-	if privacy == "" {
+	inbox := isInbox(o)
+	if m, _ := o["posting_mode"].(string); m != "" && m != "direct" && m != "inbox" {
+		errs = append(errs, "TikTok posting_mode must be direct (default) or inbox")
+	}
+	if inbox {
+		// Inbox mode sends the media to the creator's TikTok inbox: privacy and interactions are chosen in the app.
+	} else if privacy == "" {
 		errs = append(errs, "TikTok requires options.privacy_level chosen by the creator (no default allowed): "+strings.Join(privacyLevels, ", "))
 	} else if !slices.Contains(privacyLevels, privacy) {
 		errs = append(errs, "TikTok privacy_level must be one of "+strings.Join(privacyLevels, ", "))
@@ -407,12 +413,20 @@ func boolOpt(o map[string]any, k string) bool {
 	return v
 }
 
+// isInbox: posting_mode=inbox sends the media to the creator's TikTok inbox (Content Posting API
+// "upload" / MEDIA_UPLOAD); the creator finishes and publishes the post in the TikTok app within 24 hours.
+// It needs the video.upload scope and, unlike direct posting, works for unaudited apps on public accounts.
+func isInbox(o map[string]any) bool { m, _ := o["posting_mode"].(string); return m == "inbox" }
+
 func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*providers.PublishResult, error) {
 	if errs := validate(req); len(errs) > 0 {
 		return nil, providers.Invalid(strings.Join(errs, "; "))
 	}
 	o := req.Options
 	photo := isPhoto(req)
+	if isInbox(o) {
+		return c.publishInbox(ctx, req, photo)
+	}
 	// TikTok requires fresh creator info before every post.
 	var ci creatorInfo
 	if err := c.call(ctx, "POST", "/v2/post/publish/creator_info/query/", nil, &ci); err != nil {
@@ -474,6 +488,26 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 	return res, nil
 }
 
+func (c *Client) publishInbox(ctx context.Context, req providers.PublishRequest, photo bool) (*providers.PublishResult, error) {
+	text := strings.Join(req.Parts, "\n\n")
+	var publishID string
+	var err error
+	if photo {
+		// MEDIA_UPLOAD keeps only title and description; the rest is chosen in the app.
+		publishID, err = c.postPhotos(ctx, req.Media, text, req.Options, map[string]any{}, "MEDIA_UPLOAD")
+	} else {
+		publishID, err = c.uploadVideoTo(ctx, "/v2/post/publish/inbox/video/init/", req.Media[0], nil)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.waitPublished(ctx, publishID); err != nil {
+		return nil, err
+	}
+	id := "inbox:" + publishID
+	return &providers.PublishResult{RemoteID: id, RemoteIDs: []string{id}}, nil
+}
+
 // chunkPlan follows the Media Transfer Guide: total_chunk_count = floor(video_size / chunk_size),
 // every chunk is 5-64 MB except the last one, which absorbs the remainder (up to 128 MB);
 // files under 5 MB must go in a single chunk. Small files (<= 20 MiB) are sent whole; larger ones
@@ -486,16 +520,23 @@ func chunkPlan(size int64) (chunk int64, count int64) {
 }
 
 func (c *Client) uploadVideo(ctx context.Context, m providers.MediaFile, postInfo map[string]any) (string, error) {
+	return c.uploadVideoTo(ctx, "/v2/post/publish/video/init/", m, postInfo)
+}
+
+// uploadVideoTo initialises a file upload on path (direct post or inbox) and sends the chunks.
+func (c *Client) uploadVideoTo(ctx context.Context, path string, m providers.MediaFile, postInfo map[string]any) (string, error) {
 	cs, n := chunkPlan(m.Size)
 	var init struct {
 		PublishID string `json:"publish_id"`
 		UploadURL string `json:"upload_url"`
 	}
 	body := map[string]any{
-		"post_info":   postInfo,
 		"source_info": map[string]any{"source": "FILE_UPLOAD", "video_size": m.Size, "chunk_size": cs, "total_chunk_count": n},
 	}
-	if err := c.call(ctx, "POST", "/v2/post/publish/video/init/", body, &init); err != nil {
+	if postInfo != nil {
+		body["post_info"] = postInfo
+	}
+	if err := c.call(ctx, "POST", path, body, &init); err != nil {
 		return "", err
 	}
 	if init.UploadURL == "" {
@@ -537,7 +578,11 @@ func (c *Client) uploadVideo(ctx context.Context, m providers.MediaFile, postInf
 	return init.PublishID, nil
 }
 
-func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, text string, o map[string]any, postInfo map[string]any) (string, error) {
+func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, text string, o map[string]any, postInfo map[string]any, mode ...string) (string, error) {
+	postMode := "DIRECT_POST"
+	if len(mode) > 0 {
+		postMode = mode[0]
+	}
 	var urls []string
 	for _, m := range media {
 		if !strings.HasPrefix(m.PublicURL, "https://") {
@@ -555,7 +600,9 @@ func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, te
 	if text != "" {
 		postInfo["description"] = text
 	}
-	postInfo["auto_add_music"] = boolOpt(o, "auto_add_music")
+	if postMode == "DIRECT_POST" {
+		postInfo["auto_add_music"] = boolOpt(o, "auto_add_music")
+	}
 	cover := 0
 	if v, ok := o["photo_cover_index"].(float64); ok {
 		cover = int(v)
@@ -569,7 +616,7 @@ func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, te
 	body := map[string]any{
 		"post_info":   postInfo,
 		"source_info": map[string]any{"source": "PULL_FROM_URL", "photo_images": urls, "photo_cover_index": cover},
-		"post_mode":   "DIRECT_POST",
+		"post_mode":   postMode,
 		"media_type":  "PHOTO",
 	}
 	if v, ok := o["is_aigc"].(bool); ok {
