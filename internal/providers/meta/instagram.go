@@ -42,8 +42,11 @@ func init() {
 			"instagram_business_content_publish, instagram_business_manage_comments, instagram_business_manage_insights). " +
 			"Image (JPEG), carousel (up to 20 items), Reels (default for video; options share_to_feed, cover_url, thumb_offset, audio_name), " +
 			"stories (options.media_type=STORIES); options location_id, collaborators; likes/comments/insights; comment replies; history import. " +
-			"Needs RELAY_BASE_URL reachable from the internet: Instagram downloads the media from Relay. Long-lived token is refreshed automatically.",
-		CredentialFields: []string{"access_token"},
+			"Needs RELAY_BASE_URL reachable from the internet: Instagram downloads the media from Relay. Long-lived token is refreshed automatically. " +
+			"Accounts linked to a Facebook Page (Instagram API with Facebook Login, as Postiz connects them) also work: set login=facebook, " +
+			"user_id=<Instagram business account id> and access_token=<Page access token> (instagram_basic, instagram_content_publish, " +
+			"instagram_manage_comments, instagram_manage_insights, pages_read_engagement).",
+		CredentialFields: []string{"access_token", "login", "user_id"},
 		Validate:         validateInstagram,
 		New: func(c map[string]string, persist func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			if c["access_token"] == "" {
@@ -53,11 +56,21 @@ func init() {
 			if v == "" {
 				v = DefaultVersion
 			}
+			fbLogin := c["login"] == "facebook"
+			if c["login"] != "" && c["login"] != "instagram" && !fbLogin {
+				return nil, errors.New("instagram: login must be instagram (default) or facebook")
+			}
+			if fbLogin && c["user_id"] == "" {
+				return nil, errors.New("instagram: login=facebook needs user_id (the Instagram business account id linked to the Page)")
+			}
 			base := c["base_url"]
 			if base == "" {
 				base = "https://graph.instagram.com"
+				if fbLogin {
+					base = "https://graph.facebook.com"
+				}
 			}
-			ig := &Instagram{UserID: c["user_id"], Username: c["username"], g: &graph{Base: base + "/" + v, Token: c["access_token"], HC: hc}, root: base, creds: c, persist: persist}
+			ig := &Instagram{UserID: c["user_id"], Username: c["username"], g: &graph{Base: base + "/" + v, Token: c["access_token"], HC: hc}, root: base, creds: c, persist: persist, fbLogin: fbLogin}
 			return ig, nil
 		},
 	})
@@ -128,6 +141,9 @@ type Instagram struct {
 	root             string
 	creds            map[string]string
 	persist          func(map[string]string) error
+	// fbLogin: the account is reached through its Facebook Page (graph.facebook.com, Page token).
+	// There is no /me for the Instagram user and the Page token does not expire, so nothing is refreshed.
+	fbLogin bool
 	// PollInterval for container processing (tests override it).
 	PollInterval time.Duration
 }
@@ -136,7 +152,7 @@ type Instagram struct {
 // Meta only refreshes tokens that are at least 24 hours old and not expired
 // (GET graph.instagram.com/refresh_access_token, unversioned).
 func (ig *Instagram) maybeRefresh(ctx context.Context) {
-	if ig.persist == nil {
+	if ig.persist == nil || ig.fbLogin {
 		return
 	}
 	last, _ := time.Parse(time.RFC3339, ig.creds["token_refreshed_at"])
@@ -178,7 +194,12 @@ func (ig *Instagram) Identify(ctx context.Context) (*providers.Identity, error) 
 		Username string `json:"username"`
 		Name     string `json:"name"`
 	}
-	if err := ig.g.get(ctx, "/me", url.Values{"fields": {"id,user_id,username,name"}}, &r); err != nil {
+	if ig.fbLogin {
+		// The IG User node has no user_id field: its id is already the professional account id.
+		if err := ig.g.get(ctx, "/"+ig.creds["user_id"], url.Values{"fields": {"id,username,name"}}, &r); err != nil {
+			return nil, err
+		}
+	} else if err := ig.g.get(ctx, "/me", url.Values{"fields": {"id,user_id,username,name"}}, &r); err != nil {
 		return nil, err
 	}
 	// user_id is the professional account ID used by /<IG_ID>/media; id is app-scoped.
@@ -201,7 +222,11 @@ func (ig *Instagram) AccountMetrics(ctx context.Context) (map[string]int64, erro
 		Follows   int64 `json:"follows_count"`
 		Media     int64 `json:"media_count"`
 	}
-	if err := ig.g.get(ctx, "/me", url.Values{"fields": {"followers_count,follows_count,media_count"}}, &r); err != nil {
+	node := "/me"
+	if ig.fbLogin {
+		node = "/" + ig.creds["user_id"]
+	}
+	if err := ig.g.get(ctx, node, url.Values{"fields": {"followers_count,follows_count,media_count"}}, &r); err != nil {
 		return nil, err
 	}
 	return map[string]int64{"followers": r.Followers, "following": r.Follows, "posts": r.Media}, nil

@@ -360,6 +360,54 @@ func TestInstagramIdentifyAndAccountMetrics(t *testing.T) {
 	}
 }
 
+func TestInstagramFacebookLogin(t *testing.T) {
+	// Accounts connected through a Facebook Page (as Postiz does): Graph host, Page token,
+	// the IG User node instead of /me, and no ig_refresh_token call.
+	f := newFakeIG(t, map[string]func(url.Values) string{
+		"GET /v26.0/ig9": func(q url.Values) string {
+			if q.Get("access_token") != "pagetok" {
+				t.Errorf("token %q", q.Get("access_token"))
+			}
+			if q.Get("fields") == "followers_count,follows_count,media_count" {
+				return `{"followers_count":900,"follows_count":3,"media_count":61}`
+			}
+			if q.Get("fields") != "id,username,name" {
+				t.Errorf("fields %q", q.Get("fields"))
+			}
+			return `{"id":"ig9","username":"ridemypark","name":"Ride My Park"}`
+		},
+		"POST /v26.0/ig9/media":         static(`{"id":"c1"}`),
+		"GET /v26.0/c1":                 static(`{"status_code":"FINISHED"}`),
+		"POST /v26.0/ig9/media_publish": static(`{"id":"m1"}`),
+		"GET /v26.0/m1":                 static(`{"permalink":"https://www.instagram.com/p/x/"}`),
+	})
+	saved := 0
+	ig := newTestIG(t, f, map[string]string{"login": "facebook", "user_id": "ig9", "username": "", "access_token": "pagetok", "token_refreshed_at": ""},
+		func(map[string]string) error { saved++; return nil })
+	id, err := ig.Identify(context.Background())
+	if err != nil || id.RemoteUserID != "ig9" || id.Handle != "ridemypark" || id.Name != "Ride My Park" {
+		t.Fatalf("identify %v %+v", err, id)
+	}
+	m, err := ig.AccountMetrics(context.Background())
+	if err != nil || m["followers"] != 900 || m["posts"] != 61 {
+		t.Fatalf("account %v %v", err, m)
+	}
+	res, err := ig.Publish(context.Background(), providers.PublishRequest{Parts: []string{"hi"}, Media: []providers.MediaFile{jpeg("a.jpg")}})
+	if err != nil || res.RemoteID != "m1" {
+		t.Fatalf("publish %v %+v", err, res)
+	}
+	if n := f.count("GET /refresh_access_token"); n != 0 || saved != 0 {
+		t.Fatalf("refresh calls %d, persisted %d", n, saved)
+	}
+	fac, _ := providers.Get("instagram")
+	if _, err := fac.New(map[string]string{"access_token": "x", "login": "facebook"}, nil, nil); err == nil {
+		t.Fatal("login=facebook without user_id must fail")
+	}
+	if _, err := fac.New(map[string]string{"access_token": "x", "login": "bogus"}, nil, nil); err == nil {
+		t.Fatal("unknown login must fail")
+	}
+}
+
 func TestInstagramTokenRefresh(t *testing.T) {
 	f := newFakeIG(t, map[string]func(url.Values) string{
 		"GET /refresh_access_token": func(q url.Values) string {
