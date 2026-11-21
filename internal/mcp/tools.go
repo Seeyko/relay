@@ -139,6 +139,25 @@ func BuildTools(svc *core.Service) []Tool {
 			},
 		},
 		{
+			Name:        "update_account_credentials",
+			Admin:       true,
+			Description: "Change some credential fields of a connected account (new token after a reconnection, a refresh token...). Other fields are kept; a field set to \"\" is removed. The result is verified with the network and must be the same remote account, so posts and history stay attached.",
+			InputSchema: obj(map[string]any{
+				"account_id":  str(""),
+				"credentials": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "Fields to set, as in connect_account"},
+			}, "account_id", "credentials"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					AccountID   string            `json:"account_id"`
+					Credentials map[string]string `json:"credentials"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.UpdateCredentials(ctx, a.AccountID, a.Credentials)
+			},
+		},
+		{
 			Name:  "set_account_avatar",
 			Admin: true,
 			Description: "Set the profile picture Relay shows for an account in its previews, or for every account (account_id \"all\"). " +

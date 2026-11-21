@@ -87,6 +87,7 @@ func (a *API) Handler() http.Handler {
 	})
 	authed.HandleFunc("POST /v1/accounts/{id}/import", a.tool("import_history", map[string]string{"id": "account_id"}))
 	// Profile pictures: {"media": "<id>"} or {"media_url": "https://..."}, or {"clear": true}.
+	authed.HandleFunc("PATCH /v1/accounts/{id}/credentials", a.tool("update_account_credentials", map[string]string{"id": "account_id"}))
 	authed.HandleFunc("PUT /v1/accounts/{id}/avatar", a.tool("set_account_avatar", map[string]string{"id": "account_id"}))
 	authed.HandleFunc("PUT /v1/accounts/avatar", a.toolWith("set_account_avatar", nil, map[string]any{"account_id": "all"}))
 
