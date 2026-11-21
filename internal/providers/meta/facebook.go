@@ -731,3 +731,26 @@ func parseGraphTime(s string) time.Time {
 	}
 	return time.Time{}
 }
+
+// Delete removes the Page post (DELETE /{post-id} with the Page token). The other parts of a thread are
+// comments of the Page on that post: Facebook removes them with it.
+// https://developers.facebook.com/docs/graph-api/reference/post/#deleting
+func (f *Facebook) Delete(ctx context.Context, remoteIDs []string) error {
+	if len(remoteIDs) == 0 {
+		return nil
+	}
+	id := remoteIDs[0]
+	var r struct {
+		Success bool `json:"success"`
+	}
+	if err := f.g.del(ctx, "/"+url.PathEscape(id), &r); err != nil {
+		if gone(err) {
+			return nil
+		}
+		return fmt.Errorf("facebook: delete post %s: %w", id, err)
+	}
+	if !r.Success {
+		return fmt.Errorf("facebook: post %s not deleted", id)
+	}
+	return nil
+}

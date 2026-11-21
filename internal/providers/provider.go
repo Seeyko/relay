@@ -150,6 +150,15 @@ type Avatarer interface {
 	AvatarURL(ctx context.Context) (string, error)
 }
 
+// Deleter is implemented by clients that can delete a published post from the network.
+// remoteIDs are the ids Relay stored for the post, in order: the post itself, then the other parts of its
+// thread (replies on X and Threads, comments of the account on Facebook and LinkedIn). The connector
+// removes all of them. An id the network no longer knows counts as deleted, so a second call after a
+// partial failure finishes the job.
+type Deleter interface {
+	Delete(ctx context.Context, remoteIDs []string) error
+}
+
 // Factory builds a client from decrypted credentials. persist lets a client save refreshed tokens.
 type Factory struct {
 	Name        string
@@ -223,6 +232,12 @@ type HTTPError struct {
 
 func (e *HTTPError) Error() string {
 	return fmt.Sprintf("http %d: %s", e.Status, truncate(e.Body, 500))
+}
+
+// NotFound says whether err is an HTTP 404 from the network.
+func NotFound(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status == http.StatusNotFound
 }
 
 // Retryable says whether the scheduler should try again later.

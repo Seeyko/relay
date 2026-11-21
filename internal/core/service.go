@@ -634,6 +634,52 @@ func (s *Service) publish(ctx context.Context, p *store.Post) error {
 	return err
 }
 
+// DeleteResult is what DeletePost did.
+type DeleteResult struct {
+	Deleted bool `json:"deleted"`
+	// RemoteDeleted lists the network ids removed from the network (remote=true only).
+	RemoteDeleted []string `json:"remote_deleted,omitempty"`
+}
+
+// DeletePost removes a post from Relay. With remote, it first deletes the published post from the
+// network, with every part of its thread. The Relay copy is kept when the network delete fails, so the
+// call can be made again (ids already gone on the network count as deleted).
+func (s *Service) DeletePost(ctx context.Context, id string, remote bool) (*DeleteResult, error) {
+	p, err := s.Store.GetPost(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	res := &DeleteResult{}
+	ids := p.RemoteIDs
+	if len(ids) == 0 && p.RemoteID != "" {
+		ids = []string{p.RemoteID}
+	}
+	if remote && len(ids) > 0 {
+		acc, err := s.Store.GetAccount(ctx, p.AccountID)
+		if err != nil {
+			return nil, fmt.Errorf("account %s: %w", p.AccountID, err)
+		}
+		cl, err := s.client(ctx, acc)
+		if err != nil {
+			return nil, err
+		}
+		d, ok := cl.(providers.Deleter)
+		if !ok {
+			return nil, invalid("%s cannot delete published posts through its API: delete it on the network, then call delete_post without remote", acc.Provider)
+		}
+		if err := d.Delete(ctx, ids); err != nil {
+			return nil, fmt.Errorf("post kept in Relay, network delete failed (safe to retry): %w", err)
+		}
+		res.RemoteDeleted = ids
+		s.Log.Info("post deleted from the network", "post", p.ID, "provider", acc.Provider, "ids", len(ids))
+	}
+	if err := s.Store.DeletePost(ctx, id); err != nil {
+		return nil, err
+	}
+	res.Deleted = true
+	return res, nil
+}
+
 // validate runs the provider's pre-flight checks. media holds the media of each part (media[0]: part 1).
 func (s *Service) validate(a *store.Account, parts []string, media [][]providers.MediaFile, opts map[string]any) []string {
 	f, err := providers.Get(a.Provider)
