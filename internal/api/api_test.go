@@ -20,6 +20,7 @@ import (
 	"github.com/Seeyko/relay/internal/secret"
 	"github.com/Seeyko/relay/internal/store"
 
+	_ "github.com/Seeyko/relay/internal/providers/linkedin"
 	_ "github.com/Seeyko/relay/internal/providers/meta"
 	_ "github.com/Seeyko/relay/internal/providers/threads"
 	_ "github.com/Seeyko/relay/internal/providers/tiktok"
@@ -539,5 +540,57 @@ func TestThreadsProvider(t *testing.T) {
 	got, _ := e.svc.Store.GetPost(ctx, p.ID)
 	if norm := core.Normalize(got.Metrics); norm["views"] != 100 || norm["likes"] != 9 || norm["shares"] != 2 {
 		t.Fatalf("normalized %v", norm)
+	}
+}
+
+func TestLinkedInPage(t *testing.T) {
+	e := newEnv(t)
+	li := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer tok" || r.Header.Get("X-Restli-Protocol-Version") != "2.0.0" {
+			t.Errorf("headers on %s: %v", r.URL.Path, r.Header)
+		}
+		b, _ := io.ReadAll(r.Body)
+		switch p := r.URL.EscapedPath(); {
+		case p == "/rest/organizations/42":
+			w.Write([]byte(`{"id":42,"localizedName":"RideMyPark","vanityName":"ridemypark"}`))
+		case p == "/rest/posts" && r.Method == "POST":
+			if !strings.Contains(string(b), `"commentary":"hello li \\(page\\)"`) || !strings.Contains(string(b), `"author":"urn:li:organization:42"`) {
+				t.Errorf("post body %s", b)
+			}
+			w.Header().Set("x-restli-id", "urn:li:share:7")
+			w.WriteHeader(201)
+		case p == "/v2/socialActions/urn%3Ali%3Ashare%3A7/comments" && r.Method == "POST":
+			w.WriteHeader(201)
+			w.Write([]byte(`{"commentUrn":"urn:li:comment:(urn:li:activity:8,1)"}`))
+		case p == "/v2/socialActions/urn%3Ali%3Ashare%3A7/comments":
+			w.Write([]byte(`{"elements":[{"commentUrn":"urn:li:comment:(urn:li:activity:8,2)","actor":"urn:li:person:x","message":{"text":"rad"},"created":{"time":1763700000000}},` +
+				`{"commentUrn":"urn:li:comment:(urn:li:activity:8,1)","actor":"urn:li:organization:42","message":{"text":"part two"}}]}`))
+		case p == "/rest/organizationalEntityShareStatistics":
+			w.Write([]byte(`{"elements":[{"share":"urn:li:share:7","totalShareStatistics":{"impressionCount":120,"likeCount":9,"commentCount":1,"shareCount":2}}]}`))
+		default:
+			t.Errorf("unexpected %s %s", r.Method, p)
+			w.WriteHeader(404)
+		}
+	}))
+	defer li.Close()
+	ctx := context.Background()
+	acc, err := e.svc.ConnectAccount(ctx, "linkedin-page", "", map[string]string{"organization_id": "42", "access_token": "tok", "base_url": li.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := e.svc.Schedule(ctx, core.ScheduleInput{AccountIDs: []string{acc.ID}, Thread: []string{"hello li (page)", "part two"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.svc.PublishNow(ctx, ps[0].ID)
+	if err != nil || p.Status != "published" || p.RemoteURL != "https://www.linkedin.com/feed/update/urn:li:share:7" || len(p.RemoteIDs) != 2 {
+		t.Fatalf("publish: %v %+v", err, p)
+	}
+	cs, err := e.svc.RefreshComments(ctx, p.ID)
+	if err != nil || len(cs) != 1 || cs[0].Author != "urn:li:person:x" {
+		t.Fatalf("comments: %v %+v", err, cs)
+	}
+	if n, err := e.svc.RefreshMetrics(ctx, acc.ID, time.Now().Add(-time.Hour)); err != nil || n != 1 {
+		t.Fatalf("metrics: %d %v", n, err)
 	}
 }
