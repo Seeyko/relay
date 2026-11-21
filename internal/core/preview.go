@@ -49,6 +49,30 @@ type PostPreview struct {
 	Texts    []PreviewText  `json:"texts"`
 	Media    []PreviewMedia `json:"media"`
 	Problems []string       `json:"problems"`
+	// Stats are the normalized counters of a published post (see PublicStats).
+	Stats map[string]float64 `json:"stats,omitempty"`
+}
+
+// PublicStats returns the normalized counters of a post for display: views, likes, comments,
+// shares, saves and engagement_rate. Counters the network does not report are left out.
+func PublicStats(raw map[string]int64) map[string]float64 {
+	if len(raw) == 0 {
+		return nil
+	}
+	n := Normalize(raw)
+	out := map[string]float64{}
+	for _, k := range []string{"views", "likes", "comments", "shares", "saves"} {
+		if n[k] > 0 || (k == "views" && n[k] == 0) {
+			out[k] = float64(n[k])
+		}
+	}
+	if n["views"] > 0 {
+		out["engagement_rate"] = round(engagementRate(n), 4)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // GroupPreview is every post created by one schedule_post call (one per account).
@@ -108,6 +132,9 @@ func (s *Service) timezone() string {
 // PreviewPost builds the preview of one post. acc may be nil (account deleted).
 func (s *Service) PreviewPost(ctx context.Context, p *store.Post, acc *store.Account) PostPreview {
 	pv := PostPreview{Post: p, Account: acc, Media: []PreviewMedia{}, Problems: []string{}}
+	if p.Status == store.StatusPublished {
+		pv.Stats = PublicStats(p.Metrics)
+	}
 	var files []providers.MediaFile
 	for _, id := range p.Media {
 		m, err := s.Store.GetMedia(ctx, id)
