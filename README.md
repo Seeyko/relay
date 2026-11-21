@@ -18,7 +18,8 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 - **Agent feedback loop**: when a user asks for something Relay cannot do, the agent files it with `submit_feedback`
   (full text + screenshots); maintainer agents read open feedback and open pull requests
 - A task queue for a local browser agent, for networks without a usable API
-- A small open protocol to plug in **any website** as a channel ([Relay Site Protocol](docs/SITE_PROTOCOL.md))
+- A small open protocol to plug in **any website** as a channel and drive its blog: drafts, edits, publish/unpublish,
+  translations, taxonomy, media and the site's own features as extensions ([Relay Site Protocol v2](docs/SITE_PROTOCOL.md))
 
 ## Connectors
 
@@ -31,7 +32,7 @@ about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like
 | `threads` | text (500), image, video, carousel (2-20), threads (reply chains, media per part), replies, quotes, link attachment | views, likes, replies, reposts, quotes, shares; followers | read + reply | `access_token` (long-lived, auto-refreshed), optional `user_id` |
 | `youtube` | videos and Shorts (resumable upload) | views, likes, comments (+ YouTube Analytics) | read + reply | `client_id`, `client_secret`, `refresh_token` |
 | `tiktok` | videos, photo posts (Content Posting API) | views, likes, comments, shares | not available in the public API | `client_key`, `client_secret`, `access_token`, `refresh_token` |
-| `website` | Markdown articles | if the site supports it | if the site supports it | `base_url`, `token` |
+| `website` | Markdown or HTML articles (published, draft or scheduled on the site); full blog management with the `site_*` tools (v2) | if the site supports it | if the site supports it | `base_url`, `token` |
 
 TikTok requires `options.privacy_level` on every post (one of the values the creator's account allows), and
 unaudited TikTok apps can only post privately. Meta connectors use Graph API v26.0; Threads uses the Threads API v1.0. The LinkedIn connector posts as a company page with Community
@@ -195,6 +196,10 @@ Tools:
 - Conversations: `list_comments`, `reply_comment`
 - Browser agent: `create_browser_task`, `list_browser_tasks`
 - Connected apps (admin): `list_oauth_grants`, `revoke_oauth_grant`
+- Website content (Site Protocol v2, `account_id` of a website account): `site_info`, `site_list_articles`, `site_get_article`,
+  `site_create_article`, `site_update_article`, `site_publish_article`, `site_unpublish_article`, `site_delete_article`,
+  `site_taxonomy`, `site_authors`, `site_list_translations`, `site_set_translation`, `site_delete_translation`,
+  `site_upload_media`, `site_actions`, `site_action`. See [Websites](#websites)
 - Team (admin): `list_members`, `invite_member`, `update_member` (role, disabled, email, name; `action: resend|revoke`
   for a pending invitation), `remove_member`. Called through an OAuth app, they act as the member who approved it
 
@@ -331,6 +336,16 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | POST | `/v1/feedback` | `submit_feedback` |
 | GET | `/v1/feedback`, `/v1/feedback/{id}` | `list_feedback` (admin) / `get_feedback` |
 | PATCH | `/v1/feedback/{id}` | `update_feedback` (admin) |
+| GET | `/v1/sites/{account}` | `site_info` |
+| GET / POST | `/v1/sites/{account}/articles` | `site_list_articles` / `site_create_article` |
+| GET / PATCH / DELETE | `/v1/sites/{account}/articles/{article}` | `site_get_article` / `site_update_article` / `site_delete_article` |
+| POST | `/v1/sites/{account}/articles/{article}/publish`, `.../unpublish` | `site_publish_article` / `site_unpublish_article` |
+| GET | `/v1/sites/{account}/articles/{article}/translations` | `site_list_translations` |
+| PUT / DELETE | `/v1/sites/{account}/articles/{article}/translations/{lang}` | `site_set_translation` / `site_delete_translation` |
+| GET | `/v1/sites/{account}/taxonomy`, `/v1/sites/{account}/authors` | `site_taxonomy` / `site_authors` |
+| POST | `/v1/sites/{account}/media` | `site_upload_media` (`{"media": "med_..."}` or `{"url": "..."}`) |
+| GET | `/v1/sites/{account}/actions` | `site_actions` |
+| POST | `/v1/sites/{account}/actions/{action}` | `site_action` (the body is the action's arguments) |
 | POST | `/v1/tools/{name}` | any tool, JSON arguments |
 
 ```bash
@@ -343,6 +358,37 @@ curl -X POST https://<your-host>/v1/posts \
 `planned_at`, see [Planned drafts](#planned-drafts)).
 `per_account` gives an account its own text; `options` carries network settings (`reply_to`, `title`, `tags`,
 `media_type`, `link`...).
+
+## Websites
+
+Any site that implements the [Relay Site Protocol](docs/SITE_PROTOCOL.md) is an account like the others
+(`provider: website`, credentials `base_url` and `token`). With **v2**, agents drive the site's blog:
+
+- `schedule_post` on a website account creates an article when the post goes out (options `title`, `slug`, `excerpt`,
+  `tags`, `category`, `lang`, `cover`, `author_id`, `status` published/draft/scheduled, `published_at`,
+  `body_format` markdown/html, `extra`), with Relay's retries and calendar.
+- The `site_*` tools read and change the site's content directly: list and read articles (drafts included), create,
+  edit (`expected_updated_at` prevents overwriting someone else's change), publish, schedule, unpublish, delete,
+  translations (manual or machine), categories, tags, authors and media (from Relay's library or a URL the site
+  downloads).
+- **Extensions**: a site lists its own features in `/info` (search, image import to its CDN, blog analytics,
+  re-translation...). `site_actions` shows them with their JSON Schema and `site_action` calls one; Relay has no code
+  for any of them.
+- Every tool checks the site's capabilities first and refuses cleanly when one is missing. `/info` is cached
+  5 minutes per account (`site_info` with `refresh: true` reads it again).
+- Drafts-only keys may read, create drafts, edit drafts and their translations, upload media and call extensions that
+  are read-only and not `admin`. Publishing, unpublishing and deleting need an admin key.
+- `delete_post` with `delete_on_site: true` also deletes the article of a website post on the site.
+- v1 sites keep working for publishing, metrics, comments and history; the `site_*` tools need v2.
+
+Check a site's implementation with the conformance checker built into the binary:
+
+```bash
+relay site-check https://example.com "$SITE_TOKEN"          # read-only checks of every declared capability
+relay site-check https://example.com "$SITE_TOKEN" --write  # also creates, edits and deletes one draft (never publishes)
+```
+
+It prints `PASS` / `FAIL` / `WARN` / `SKIP` per check and exits `1` when a check fails.
 
 ## Analytics queries
 

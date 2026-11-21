@@ -29,7 +29,7 @@ import (
 	_ "github.com/Seeyko/relay/internal/providers/meta"
 	_ "github.com/Seeyko/relay/internal/providers/threads"
 	_ "github.com/Seeyko/relay/internal/providers/tiktok"
-	_ "github.com/Seeyko/relay/internal/providers/website"
+	"github.com/Seeyko/relay/internal/providers/website"
 	_ "github.com/Seeyko/relay/internal/providers/x"
 	_ "github.com/Seeyko/relay/internal/providers/youtube"
 )
@@ -64,6 +64,9 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "site-check" {
+		os.Exit(siteCheck(os.Args[2:]))
 	}
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(log); err != nil {
@@ -229,3 +232,42 @@ func bootstrapX(ctx context.Context, svc *core.Service, log *slog.Logger) {
 	}
 	log.Info("connected X account from env", "account", acc.ID, "handle", acc.Handle)
 }
+
+// siteCheck runs the Site Protocol v2 conformance checker: relay site-check <base_url> <token> [--write].
+func siteCheck(args []string) int {
+	var pos []string
+	write := false
+	for _, a := range args {
+		switch a {
+		case "--write", "-write":
+			write = true
+		case "-h", "--help", "help":
+			pos = nil
+			fmt.Fprintln(os.Stderr, siteCheckUsage)
+			return 2
+		default:
+			pos = append(pos, a)
+		}
+	}
+	tok := os.Getenv("RELAY_SITE_TOKEN")
+	if len(pos) == 2 && pos[1] != "-" {
+		tok = pos[1]
+	}
+	if len(pos) < 1 || len(pos) > 2 || tok == "" {
+		fmt.Fprintln(os.Stderr, siteCheckUsage)
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if website.Check(ctx, &http.Client{Timeout: 30 * time.Second}, pos[0], tok, write, os.Stdout) > 0 {
+		return 1
+	}
+	return 0
+}
+
+const siteCheckUsage = `usage: relay site-check <base_url> [<token>] [--write]
+
+Checks a site against the Relay Site Protocol v2 (docs/SITE_PROTOCOL.md).
+The token may also come from RELAY_SITE_TOKEN (pass - or omit it).
+Read-only by default; --write also creates, edits and deletes one draft (never publishes).
+Exit status: 0 all checks passed, 1 a check failed, 2 usage error.`

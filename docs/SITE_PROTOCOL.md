@@ -374,8 +374,9 @@ metrics and comments use the routes above.
 `site_info`, `site_list_articles`, `site_get_article`, `site_create_article`, `site_update_article`,
 `site_publish_article`, `site_unpublish_article`, `site_delete_article`, `site_taxonomy`, `site_authors`,
 `site_list_translations`, `site_set_translation`, `site_delete_translation`, `site_upload_media`, `site_actions`,
-`site_action`. Drafts-only keys may read, create drafts, and edit articles that are drafts (content and
-translations); they cannot publish, unpublish or delete. See the README for the REST routes.
+`site_action`. `site_create_article` makes a draft unless `status` says otherwise. Drafts-only keys may read, create
+drafts, edit articles that are drafts (content and translations), upload media and call extensions that are read-only
+and not `admin`; they cannot publish, unpublish or delete. See the README for the REST routes.
 
 **Deleting a Relay post** with `delete_post` and `delete_on_site: true` also deletes the article on the site
 (`DELETE /posts/{id}`, needs `delete`).
