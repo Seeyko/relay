@@ -93,8 +93,19 @@ and keep working.
 
 ## Dashboard
 
-A minimal, read-only calendar at `https://<your-host>/ui/`: week and day views of every post across networks, with a
-preview of the text, media, status and errors. It cannot publish or edit anything.
+A minimal, read-only dashboard at `https://<your-host>/ui/`:
+
+- **Calendar**: week and day views of every post across networks. Drafts with a planned time (`planned_at`) show at
+  that time with a dashed outline and a "Draft" label.
+- **Drafts**: every draft, dated or not, newest first. One card per `schedule_post` call, with each target network
+  and the number of pre-flight problems.
+- **Preview** (tap any post): the whole group, one tab per account, laid out roughly the way each network shows it
+  (thread with a counter per post, Instagram caption cut, YouTube title and description, LinkedIn post and comments),
+  with every media in order (images, playable videos), the options, the planned or scheduled time in
+  `RELAY_TIMEZONE`, the status and errors, and the provider's pre-flight problems, run server-side.
+
+It cannot publish, approve or edit anything: approve drafts with `approve_post` (or `POST /v1/posts/{id}/approve`).
+Media are served through Relay at `/media/`, so previews work with a private bucket.
 
 Login is passkey-only (WebAuthn, with user verification: Touch ID, Windows Hello, a security key...). To add a
 passkey, open the page, expand "Add a passkey" and enter `RELAY_API_TOKEN` once. Once your keys are added, set `RELAY_PASSKEY_REGISTRATION=off` to close registration. Sessions last 12 hours and use a
@@ -123,6 +134,20 @@ Tools:
 Set `RELAY_DRAFT_TOKEN` and give that key to sub-agents. With it, `schedule_post` always creates drafts,
 `update_post` only edits drafts, and publishing, replying, approving and account changes are hidden and refused.
 An admin key (or a human) releases drafts with `approve_post`.
+
+A date a drafter passes in `scheduled_at` becomes the draft's `planned_at`, so the owner sees it in the calendar.
+
+### Planned drafts
+
+A draft can carry `planned_at`, the time it is meant to go out. It never publishes anything by itself:
+
+- `schedule_post` with `"scheduled_at": "draft", "planned_at": "2026-12-01T09:00:00+01:00"` creates a dated draft.
+  `planned_at` with a real `scheduled_at` is refused.
+- `update_post` sets it (`"planned_at": "<RFC 3339>"`) or clears it (`""` or `"none"`), on drafts only. Moving a
+  scheduled post back to `"draft"` keeps its time as `planned_at`.
+- `approve_post` without `scheduled_at` schedules the draft at its `planned_at` when that is still in the future.
+  Otherwise (no planned time, or a past one) it publishes within one tick, as before. An explicit `scheduled_at` wins.
+- `get_post`, `list_posts` and the REST API return `planned_at`; `from`/`to` filters date drafts by it.
 
 ## REST API
 
@@ -160,7 +185,8 @@ curl -X POST https://<your-host>/v1/posts \
   -d '{"account_ids":["acc_..."],"text":"Hello","scheduled_at":"2026-12-01T09:00:00+01:00"}'
 ```
 
-`scheduled_at` is RFC 3339 with an offset, `now` (or omitted) to publish within one tick, or `draft`.
+`scheduled_at` is RFC 3339 with an offset, `now` (or omitted) to publish within one tick, or `draft` (optionally with
+`planned_at`, see [Planned drafts](#planned-drafts)).
 `per_account` gives an account its own text; `options` carries network settings (`reply_to`, `title`, `tags`,
 `media_type`, `link`...).
 

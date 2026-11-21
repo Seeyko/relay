@@ -141,6 +141,7 @@ func run(log *slog.Logger) error {
 			log.Warn("dashboard disabled", "err", err)
 		} else {
 			dash.RegistrationClosed = os.Getenv("RELAY_PASSKEY_REGISTRATION") == "off"
+			dash.Svc = svc
 			a.UI = dash
 		}
 	}

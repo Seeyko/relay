@@ -7,7 +7,7 @@
 //     hash is stored. Sessions expire after SessionTTL.
 //   - State-changing calls are JSON POSTs checked against the expected Origin.
 //   - Strict CSP (no inline script), no framing, no caching of API responses.
-//   - The dashboard is read-only: it cannot publish, edit or reply.
+//   - The dashboard is read-only: it cannot publish, approve, edit or reply.
 package ui
 
 import (
@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/store"
 )
 
@@ -47,7 +49,10 @@ const (
 )
 
 type UI struct {
-	Store    *store.Store
+	Store *store.Store
+	// Svc (optional) runs the pre-flight checks of the preview with the instance settings (timezone, media
+	// URLs). Without it, a bare service over Store is used.
+	Svc      *core.Service
 	APIToken string // required to register a passkey
 	// RegistrationClosed refuses new passkeys (RELAY_PASSKEY_REGISTRATION=off), even with the API token.
 	RegistrationClosed bool
@@ -111,6 +116,8 @@ func (ui *UI) Register(mux *http.ServeMux) {
 	mux.Handle("POST /ui/api/login/finish", ui.headers(ui.post(ui.loginFinish)))
 	mux.Handle("POST /ui/api/logout", ui.headers(ui.post(ui.logout)))
 	mux.Handle("GET /ui/api/calendar", ui.headers(ui.authed(ui.calendar)))
+	mux.Handle("GET /ui/api/drafts", ui.headers(ui.authed(ui.drafts)))
+	mux.Handle("GET /ui/api/posts/{id}", ui.headers(ui.authed(ui.preview)))
 	mux.Handle("GET /ui/api/passkeys", ui.headers(ui.authed(ui.passkeys)))
 }
 
@@ -474,10 +481,12 @@ type calMedia struct {
 }
 
 type calPost struct {
-	ID        string     `json:"id"`
-	GroupID   string     `json:"group_id"`
-	Status    string     `json:"status"`
-	At        *time.Time `json:"at"`
+	ID      string     `json:"id"`
+	GroupID string     `json:"group_id"`
+	Status  string     `json:"status"`
+	At      *time.Time `json:"at"`
+	// Planned is true for a draft placed at its planned time (it will not publish by itself).
+	Planned   bool       `json:"planned,omitempty"`
 	Provider  string     `json:"provider"`
 	Account   string     `json:"account"`
 	Handle    string     `json:"handle"`
@@ -521,6 +530,10 @@ func (ui *UI) calendar(w http.ResponseWriter, r *http.Request) {
 			cp.At = p.PublishedAt
 		case p.ScheduledAt != nil:
 			cp.At = p.ScheduledAt
+		case p.PlannedAt != nil:
+			cp.At, cp.Planned = p.PlannedAt, true
+		case p.Status == store.StatusDraft:
+			continue // a draft without a planned time has no place in the calendar: see the Drafts view has no place in the calendar: see the Drafts view
 		default:
 			t := p.CreatedAt
 			cp.At = &t
@@ -547,6 +560,111 @@ func (ui *UI) calendar(w http.ResponseWriter, r *http.Request) {
 		out = append(out, cp)
 	}
 	writeJSON(w, 200, map[string]any{"posts": out})
+}
+
+func (ui *UI) svc() *core.Service {
+	if ui.Svc != nil {
+		return ui.Svc
+	}
+	return &core.Service{Store: ui.Store}
+}
+
+type draftPost struct {
+	ID       string    `json:"id"`
+	Provider string    `json:"provider"`
+	Account  string    `json:"account"`
+	Handle   string    `json:"handle"`
+	Text     string    `json:"text"`
+	Parts    int       `json:"parts"`
+	Media    *calMedia `json:"media,omitempty"` // first media, as a thumbnail
+	Count    int       `json:"media_count"`
+	Problems int       `json:"problems"`
+}
+
+type draftGroup struct {
+	GroupID   string      `json:"group_id"`
+	PlannedAt *time.Time  `json:"planned_at,omitempty"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	Title     string      `json:"title,omitempty"`
+	Posts     []draftPost `json:"posts"`
+}
+
+// drafts lists every draft, dated or not, one card per group (one schedule_post call), newest first.
+func (ui *UI) drafts(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	posts, err := ui.Store.ListPosts(ctx, store.PostFilter{Status: store.StatusDraft, Limit: 1000})
+	if err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	accs, err := ui.Store.ListAccounts(ctx)
+	if err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	byAcc := map[string]*store.Account{}
+	for _, a := range accs {
+		byAcc[a.ID] = a
+	}
+	svc := ui.svc()
+	groups := map[string]*draftGroup{}
+	var order []*draftGroup
+	for _, p := range posts {
+		g := groups[p.GroupID]
+		if g == nil {
+			g = &draftGroup{GroupID: p.GroupID, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt, Posts: []draftPost{}}
+			groups[p.GroupID] = g
+			order = append(order, g)
+		}
+		if p.CreatedAt.After(g.CreatedAt) {
+			g.CreatedAt = p.CreatedAt
+		}
+		if p.UpdatedAt.After(g.UpdatedAt) {
+			g.UpdatedAt = p.UpdatedAt
+		}
+		if p.PlannedAt != nil && (g.PlannedAt == nil || p.PlannedAt.Before(*g.PlannedAt)) {
+			g.PlannedAt = p.PlannedAt
+		}
+		if t, ok := p.Options["title"].(string); ok && g.Title == "" {
+			g.Title = t
+		}
+		a := byAcc[p.AccountID]
+		pv := svc.PreviewPost(ctx, p, a)
+		dp := draftPost{ID: p.ID, Parts: len(p.Parts), Count: len(p.Media), Problems: len(pv.Problems)}
+		if len(p.Parts) > 0 {
+			dp.Text = p.Parts[0]
+		}
+		if a != nil {
+			dp.Provider, dp.Account, dp.Handle = a.Provider, a.Name, a.Handle
+		}
+		for _, m := range pv.Media {
+			if !m.Missing {
+				dp.Media = &calMedia{URL: m.Path, Mime: m.Mime}
+				break
+			}
+		}
+		g.Posts = append(g.Posts, dp)
+	}
+	sort.SliceStable(order, func(i, j int) bool { return order[i].CreatedAt.After(order[j].CreatedAt) })
+	if order == nil {
+		order = []*draftGroup{}
+	}
+	writeJSON(w, 200, map[string]any{"groups": order})
+}
+
+// preview returns the full preview of the group of one post: every account, text, media, options, problems.
+func (ui *UI) preview(w http.ResponseWriter, r *http.Request) {
+	pv, err := ui.svc().PreviewGroup(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		jsonErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	writeJSON(w, 200, pv)
 }
 
 func (ui *UI) passkeys(w http.ResponseWriter, r *http.Request) {

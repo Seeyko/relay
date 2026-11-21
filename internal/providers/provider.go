@@ -97,6 +97,9 @@ type Factory struct {
 	// Validate checks a post before it is scheduled (character limits, required media...).
 	// It returns human-readable problems; nil means OK. Optional.
 	Validate func(req PublishRequest) []string
+	// Count (optional) counts characters the way the network does for its text limit (default CharCount).
+	// The dashboard preview uses it for its counters.
+	Count func(text string) int
 }
 
 // CharCount counts characters the way most networks do (Unicode code points).

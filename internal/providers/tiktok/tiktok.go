@@ -49,6 +49,7 @@ func init() {
 			"Comments are not in TikTok's API for creators: use a browser task (kind tiktok.comments).",
 		CredentialFields: []string{"client_key", "client_secret", "access_token", "refresh_token"},
 		Validate:         validate,
+		Count:            utf16Len,
 		New: func(c map[string]string, persist func(map[string]string) error, hc *http.Client) (providers.Client, error) {
 			if c["access_token"] == "" && c["refresh_token"] == "" {
 				return nil, errors.New("tiktok: access_token or refresh_token is required")
