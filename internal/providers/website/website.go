@@ -27,10 +27,15 @@ func init() {
 		Name: "website",
 		Description: "Any website implementing the Relay Site Protocol v1 or v2 (articles, drafts, edit, translations, taxonomy, media, metrics, comments, site extensions). " +
 			"Post body = Markdown (or HTML with body_format html); options: title (required), slug, excerpt, tags, category, lang, cover (media id), author_id, " +
-			"status (published|draft|scheduled), published_at, body_format (markdown|html), extra. Manage the site's articles with the site_* tools.",
+			"status (published|draft|scheduled), published_at, body_format (markdown|html), extra; or article_id alone to publish an article already on the site " +
+			"(site_publish_article scheduled_at). Manage the site's articles with the site_* tools.",
 		CredentialFields: []string{"base_url", "token"},
 		Validate: func(req providers.PublishRequest) []string {
 			var out []string
+			if id, _ := req.Options["article_id"].(string); id != "" {
+				// Publication of an article that already exists on the site: its content lives there.
+				return nil
+			}
 			if t, _ := req.Options["title"].(string); strings.TrimSpace(t) == "" {
 				out = append(out, "website articles need options.title")
 			}
@@ -424,6 +429,9 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 	if o == nil {
 		o = map[string]any{}
 	}
+	if id := optStr(o, "article_id"); id != "" {
+		return c.publishExisting(ctx, i, id)
+	}
 	body := strings.Join(req.Parts, "\n\n")
 	a := article{
 		Title: optStr(o, "title"), Slug: optStr(o, "slug"), Excerpt: optStr(o, "excerpt"), Lang: optStr(o, "lang"),
@@ -494,6 +502,46 @@ func (c *Client) Publish(ctx context.Context, req providers.PublishRequest) (*pr
 		return nil, errors.New("website: POST /posts answered without an id")
 	}
 	return &providers.PublishResult{RemoteID: out.ID, RemoteIDs: []string{out.ID}, URL: out.URL}, nil
+}
+
+// publishExisting publishes an article that is already on the site (options.article_id: a draft scheduled
+// in Relay with site_publish_article scheduled_at). An article already published is not published again,
+// so a retry after a crash is safe.
+func (c *Client) publishExisting(ctx context.Context, i *Info, id string) (*providers.PublishResult, error) {
+	if !i.V2() {
+		return nil, providers.Invalid("website: options.article_id needs a Site Protocol v2 site")
+	}
+	raw, err := c.GetArticle(ctx, id)
+	var se *SiteError
+	if errors.As(err, &se) && se.Status == 404 {
+		return nil, providers.Invalid(fmt.Sprintf("website: article %s is no longer on the site", id))
+	}
+	if err != nil {
+		return nil, err
+	}
+	var a struct {
+		ID     string `json:"id"`
+		URL    string `json:"url"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, fmt.Errorf("website: invalid article JSON: %w", err)
+	}
+	if a.Status != "published" {
+		if raw, err = c.PublishArticle(ctx, id, ""); err != nil {
+			return nil, err
+		}
+		var p struct {
+			URL string `json:"url"`
+		}
+		if json.Unmarshal(raw, &p) == nil && p.URL != "" {
+			a.URL = p.URL
+		}
+	}
+	if a.ID == "" {
+		a.ID = id
+	}
+	return &providers.PublishResult{RemoteID: a.ID, RemoteIDs: []string{a.ID}, URL: a.URL}, nil
 }
 
 func (c *Client) Metrics(ctx context.Context, ids []string) (map[string]map[string]int64, error) {
