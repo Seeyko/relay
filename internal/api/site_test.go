@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Seeyko/relay/internal/api"
 	"github.com/Seeyko/relay/internal/mcp"
@@ -456,4 +457,79 @@ func TestSiteDrafterLimits(t *testing.T) {
 		t.Fatalf("admin delete: %d %s", code, raw)
 	}
 	_ = got
+}
+
+// An existing draft is scheduled in Relay (the site has no schedule capability) and published by the scheduler.
+func TestSiteScheduleExistingDraft(t *testing.T) {
+	e := newEnv(t)
+	s := sitetest.New(siteToken, "drafts", "edit", "translations")
+	acc := connectSite(t, e, s)
+	id := s.Add(sitetest.Article{Title: "Competitor review", Status: "draft"})
+	pub := s.Add(sitetest.Article{Title: "Already out", Status: "published"})
+	now := time.Now().UTC()
+	e.svc.Now = func() time.Time { return now }
+	at := now.Add(time.Hour).Format(time.RFC3339)
+
+	refused(t, e, "site_publish_article", map[string]any{"account_id": acc.ID, "article_id": id, "scheduled_at": now.Add(-time.Hour).Format(time.RFC3339)}, "future")
+	refused(t, e, "site_publish_article", map[string]any{"account_id": acc.ID, "article_id": id, "scheduled_at": at, "published_at": at}, "not both")
+	refused(t, e, "site_publish_article", map[string]any{"account_id": acc.ID, "article_id": pub, "scheduled_at": at}, "not a draft")
+	refused(t, e, "site_publish_article", map[string]any{"account_id": acc.ID, "article_id": id, "published_at": at}, "schedule")
+
+	text, isErr := e.callTool("site_publish_article", map[string]any{"account_id": acc.ID, "article_id": id, "scheduled_at": at})
+	if isErr {
+		t.Fatalf("schedule: %s", text)
+	}
+	var p store.Post
+	json.Unmarshal([]byte(text), &p)
+	if p.Status != "scheduled" || p.Options["article_id"] != id || len(p.Parts) != 1 || p.Parts[0] != "Competitor review" {
+		t.Fatalf("relay post: %s", text)
+	}
+	// REST: same tool on the publish route.
+	if code, _, raw := e.req("POST", "/v1/sites/"+acc.ID+"/articles/"+id+"/publish", map[string]any{"scheduled_at": at}); code != 200 {
+		t.Fatalf("REST schedule: %d %s", code, raw)
+	} else {
+		var p2 store.Post
+		json.Unmarshal(raw, &p2)
+		e.req("DELETE", "/v1/posts/"+p2.ID, nil)
+	}
+
+	e.sched.RunDue(context.Background())
+	if a, _ := s.Article(id); a.Status != "draft" {
+		t.Fatalf("published too early: %s", a.Status)
+	}
+
+	now = now.Add(2 * time.Hour)
+	e.sched.RunDue(context.Background())
+	a, _ := s.Article(id)
+	if a.Status != "published" {
+		t.Fatalf("article status after due time: %s", a.Status)
+	}
+	publishes := 0
+	for _, c := range s.Calls() {
+		if c.Method == "POST" && c.Path == "/relay/v2/posts" {
+			t.Fatalf("a new article was created: %v", c.Body)
+		}
+		if c.Method == "POST" && c.Path == "/relay/v2/posts/"+id+"/publish" {
+			publishes++
+		}
+	}
+	if publishes != 1 {
+		t.Fatalf("publish calls: %d", publishes)
+	}
+	_, _, raw := e.req("GET", "/v1/posts/"+p.ID, nil)
+	json.Unmarshal(raw, &p)
+	if p.Status != "published" || p.RemoteID != id {
+		t.Fatalf("relay post after publish: %s", raw)
+	}
+
+	// A retry on an article already published does not publish it again.
+	if text, isErr := e.callTool("schedule_post", map[string]any{"account_ids": []string{acc.ID}, "text": "x", "options": map[string]any{"article_id": pub}}); isErr {
+		t.Fatalf("schedule_post article_id: %s", text)
+	}
+	e.sched.RunDue(context.Background())
+	for _, c := range s.Calls() {
+		if c.Path == "/relay/v2/posts/"+pub+"/publish" {
+			t.Fatalf("already published article published again")
+		}
+	}
 }

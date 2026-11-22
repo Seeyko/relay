@@ -249,7 +249,8 @@ Tools:
 - Website content (Site Protocol v2, `account_id` of a website account): `site_info`, `site_list_articles`, `site_get_article`,
   `site_create_article`, `site_update_article`, `site_publish_article`, `site_unpublish_article`, `site_delete_article`,
   `site_taxonomy`, `site_authors`, `site_list_translations`, `site_set_translation`, `site_delete_translation`,
-  `site_upload_media`, `site_actions`, `site_action`. See [Websites](#websites)
+  `site_upload_media`, `site_actions`, `site_action`. `site_publish_article` with `scheduled_at` lets Relay publish an
+  existing draft (and its translations) at a set time. See [Websites](#websites)
 - Team (admin): `list_members`, `invite_member`, `update_member` (role, disabled, email, name; `action: resend|revoke`
   for a pending invitation), `remove_member`. Called through an OAuth app, they act as the member who approved it
 

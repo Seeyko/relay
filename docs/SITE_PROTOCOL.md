@@ -378,6 +378,11 @@ metrics and comments use the routes above.
 drafts, edit articles that are drafts (content and translations), upload media and call extensions that are read-only
 and not `admin`; they cannot publish, unpublish or delete. See the README for the REST routes.
 
+**Scheduling an existing draft in Relay**: `site_publish_article` with `scheduled_at` (RFC 3339, future) creates a
+Relay post with `options.article_id`. At that time the scheduler calls `POST /posts/{id}/publish` (with retries), so
+the draft goes live with its translations, even on a site without `schedule`. An article already published is not
+published again. Cancel with `delete_post`, move with `update_post`.
+
 **Deleting a Relay post** with `delete_post` and `delete_on_site: true` also deletes the article on the site
 (`DELETE /posts/{id}`, needs `delete`).
 

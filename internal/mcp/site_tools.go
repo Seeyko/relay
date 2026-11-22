@@ -247,15 +247,25 @@ func siteTools(svc *core.Service) []Tool {
 			Name:  "site_publish_article",
 			Admin: true,
 			Description: "Publish a draft article of a website now, or at published_at (RFC 3339): a past date back-dates it, a future one schedules it on the site " +
-				"(schedule capability). Needs the drafts capability.",
-			InputSchema: obj(map[string]any{"account_id": acc, "article_id": art, "published_at": str("optional, RFC 3339 with offset")}, "account_id", "article_id"),
+				"(schedule capability). Or give scheduled_at (RFC 3339, future) to let Relay publish the draft, with its translations, at that time: " +
+				"works on any site with the drafts capability, returns the Relay post (cancel it with delete_post, move it with update_post). " +
+				"Needs the drafts capability.",
+			InputSchema: obj(map[string]any{"account_id": acc, "article_id": art, "published_at": str("optional, RFC 3339 with offset"),
+				"scheduled_at": str("optional, RFC 3339 with offset, in the future: Relay publishes the draft then (not with published_at)")}, "account_id", "article_id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
 				a, err := decode[struct {
 					siteArgs
 					PublishedAt string `json:"published_at"`
+					ScheduledAt string `json:"scheduled_at"`
 				}](raw)
 				if err != nil {
 					return nil, err
+				}
+				if a.ScheduledAt != "" {
+					if a.PublishedAt != "" {
+						return nil, &core.ErrInvalid{Msg: "give published_at (the site schedules) or scheduled_at (Relay schedules), not both"}
+					}
+					return svc.ScheduleArticle(ctx, a.AccountID, a.ArticleID, a.ScheduledAt)
 				}
 				cl, err := site(ctx, svc, a.AccountID)
 				if err != nil {

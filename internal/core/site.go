@@ -2,7 +2,11 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/Seeyko/relay/internal/providers"
 	"github.com/Seeyko/relay/internal/providers/website"
@@ -77,4 +81,49 @@ func (s *Service) UploadToSite(ctx context.Context, cl *website.Client, mediaID,
 	files[0].Alt = alt
 	m, err := cl.UploadMedia(ctx, files[0])
 	return m, SiteErr(err)
+}
+
+// ScheduleArticle schedules, in Relay, the publication of an article that is already a draft on its
+// website (with its translations): at scheduledAt the scheduler publishes it on the site, with the
+// usual retries. It works on sites without the schedule capability. The Relay post carries the
+// article's title as its text and options.article_id; delete_post cancels it.
+func (s *Service) ScheduleArticle(ctx context.Context, accountID, articleID, scheduledAt string) (*store.Post, error) {
+	at, err := parseTime("scheduled_at", scheduledAt)
+	if err != nil {
+		return nil, err
+	}
+	if !at.After(s.now()) {
+		return nil, invalid("scheduled_at must be in the future (to publish now, leave it out)")
+	}
+	cl, acc, err := s.SiteClient(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := cl.Need(ctx, website.CapDrafts); err != nil {
+		return nil, SiteErr(err)
+	}
+	raw, err := cl.GetArticle(ctx, articleID)
+	if err != nil {
+		return nil, SiteErr(err)
+	}
+	var a struct {
+		Title  string `json:"title"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, fmt.Errorf("website: invalid article JSON: %w", err)
+	}
+	if a.Status != "draft" {
+		return nil, invalid("article %s is %s, not a draft: only a draft can be scheduled", articleID, a.Status)
+	}
+	text := a.Title
+	if strings.TrimSpace(text) == "" {
+		text = "Article " + articleID
+	}
+	posts, err := s.Schedule(ctx, ScheduleInput{AccountIDs: []string{acc.ID}, Text: text, ScheduledAt: at.Format(time.RFC3339),
+		Options: map[string]any{"article_id": articleID, "title": a.Title}})
+	if err != nil {
+		return nil, err
+	}
+	return posts[0], nil
 }
