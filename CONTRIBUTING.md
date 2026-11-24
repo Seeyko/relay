@@ -32,3 +32,8 @@ Go version: see `go.mod`.
 
 - One topic per PR, with tests.
 - Describe what you verified against the real network, if anything.
+- `main` is protected: changes land through a pull request once the `ci / test` check is green.
+  Force pushes and deleting `main` are blocked. PRs are squash-merged.
+
+The protection lives in [`.github/rulesets/main.json`](.github/rulesets/main.json) and is imported in
+**Settings → Rules → Rulesets → New ruleset → Import a ruleset**.
