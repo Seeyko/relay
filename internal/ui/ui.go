@@ -149,6 +149,8 @@ func (ui *UI) Register(mux *http.ServeMux) {
 		ui.registerTeam(mux)
 	}
 	ui.registerAccounts(mux)
+	mux.Handle("POST /ui/api/orgs", ui.headers(ui.post(ui.owner(ui.orgCreate).ServeHTTP)))
+	mux.Handle("POST /ui/api/orgs/{id}", ui.headers(ui.post(ui.owner(ui.orgUpdate).ServeHTTP)))
 }
 
 // ---------- middleware ----------
@@ -208,7 +210,20 @@ func (ui *UI) authed(fn http.HandlerFunc) http.Handler {
 			jsonErr(w, http.StatusUnauthorized, "login required")
 			return
 		}
-		fn(w, r.WithContext(context.WithValue(r.Context(), userKey{}, u)))
+		ctx := context.WithValue(r.Context(), userKey{}, u)
+		if u.Role != store.RoleOwner {
+			ctx = store.WithOrgs(ctx, u.Orgs)
+		}
+		// ?org= narrows every view to one organization (the header switcher).
+		if ref := r.URL.Query().Get("org"); ref != "" && ref != "all" {
+			o, err := ui.Store.ResolveOrg(ctx, ref)
+			if err != nil {
+				jsonErr(w, http.StatusNotFound, "unknown organization")
+				return
+			}
+			ctx = store.WithOrgs(ctx, []string{o.ID})
+		}
+		fn(w, r.WithContext(ctx))
 	})
 }
 
@@ -339,6 +354,17 @@ func (ui *UI) me(w http.ResponseWriter, r *http.Request) {
 		out["user"] = meUser{ID: u.ID, Email: u.Email, Name: u.Name, Role: u.Role, Passkeys: u.Passkeys}
 		out["team"] = ui.Team != nil && isAdmin(u)
 		out["accounts"] = isAdmin(u)
+		// The organizations the member sees, for the header switcher.
+		ctx := r.Context()
+		if u.Role != store.RoleOwner {
+			ctx = store.WithOrgs(ctx, u.Orgs)
+		}
+		orgs, err := ui.Store.ListOrgs(ctx)
+		if err != nil {
+			orgs = []*store.Org{}
+		}
+		out["orgs"] = orgs
+		out["manage_orgs"] = u.Role == store.RoleOwner
 	}
 	writeJSON(w, 200, out)
 }

@@ -244,6 +244,18 @@ func (a *API) auth(next http.Handler) http.Handler {
 			}
 			if ok && acc.UserID != "" {
 				ctx = mcp.WithUser(ctx, acc.UserID)
+				// A member who is not an owner sees only their organizations.
+				ids, full, err := a.Svc.Store.UserOrgs(ctx, acc.UserID)
+				if err != nil {
+					a.unauthorized(w, true)
+					return
+				}
+				if !full {
+					ctx = store.WithOrgs(ctx, ids)
+				}
+			}
+			if ok && len(acc.Orgs) > 0 { // the app was limited to some organizations when approved
+				ctx = store.WithOrgs(ctx, acc.Orgs)
 			}
 			switch {
 			case ok && acc.Scope == oauth.ScopeAdmin:
@@ -258,6 +270,19 @@ func (a *API) auth(next http.Handler) http.Handler {
 		if role != mcp.RoleAdmin && !drafterRoute(r) {
 			writeJSON(w, 403, map[string]string{"error": mcp.ErrForbidden.Error()})
 			return
+		}
+		// X-Relay-Org (or ?org= on /mcp) narrows every call of the request to one organization.
+		ref := r.Header.Get("X-Relay-Org")
+		if ref == "" && r.URL.Path == "/mcp" {
+			ref = r.URL.Query().Get("org")
+		}
+		if ref != "" {
+			o, err := a.Svc.Store.ResolveOrg(ctx, ref)
+			if err != nil {
+				writeJSON(w, 404, map[string]string{"error": "unknown organization " + ref})
+				return
+			}
+			ctx = store.WithOrgs(ctx, []string{o.ID})
 		}
 		next.ServeHTTP(w, r.WithContext(mcp.WithRole(ctx, role)))
 	})
@@ -375,6 +400,10 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
 	case errors.Is(err, store.ErrNotFound):
 		writeJSON(w, 404, map[string]string{"error": "not found"})
+	case errors.Is(err, store.ErrOrgRequired), errors.Is(err, store.ErrOrgScoped):
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+	case errors.Is(err, store.ErrOrgExists), errors.Is(err, store.ErrOrgNotEmpty):
+		writeJSON(w, 409, map[string]string{"error": err.Error()})
 	case errors.Is(err, mcp.ErrForbidden):
 		writeJSON(w, 403, map[string]string{"error": err.Error()})
 	case errors.Is(err, mcp.ErrUnknownTool):

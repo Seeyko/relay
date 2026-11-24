@@ -1208,3 +1208,43 @@ func TestXDeniedConsent(t *testing.T) {
 		t.Fatalf("%d %s", back.StatusCode, page)
 	}
 }
+
+// With several organizations, a sign-in says which one the account goes to; the same remote account cannot be
+// connected in a second organization, and several accounts of one network live in one organization.
+func TestConnectInOrganization(t *testing.T) {
+	h := newHarness(t, threadsEnv)
+	h.fakeThreads()
+	ctx := context.Background()
+	mlg, err := h.st.CreateOrg(ctx, "My Little Garden", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.m.Begin(ctx, Request{Network: "threads"}); err == nil || !strings.Contains(err.Error(), "several organizations") {
+		t.Fatalf("no organization given: %v", err)
+	}
+	code, page := h.run(browser(), h.begin(Request{Network: "threads", Org: "my-little-garden"}))
+	if code != 200 || !strings.Contains(page, "Threads connected") {
+		t.Fatalf("%d %s", code, page)
+	}
+	accs := h.accounts()
+	if len(accs) != 1 || accs[0].OrgID != mlg.ID {
+		t.Fatalf("account not in the organization: %+v", accs)
+	}
+	// The same remote account, asked for in the other organization: refused, nothing changes.
+	code, page = h.run(browser(), h.begin(Request{Network: "threads", Org: "default"}))
+	if code != 409 || !strings.Contains(page, "another organization") {
+		t.Fatalf("second organization: %d %s", code, page)
+	}
+	// Another remote account of the same network goes next to the first one.
+	h.setSignIn("B")
+	if code, page = h.run(browser(), h.begin(Request{Network: "threads", Org: mlg.ID})); code != 200 {
+		t.Fatalf("second account: %d %s", code, page)
+	}
+	if accs := h.accounts(); len(accs) != 2 || accs[1].OrgID != mlg.ID || accs[0].RemoteUserID == accs[1].RemoteUserID {
+		t.Fatalf("two Threads accounts in one organization: %+v", accs)
+	}
+	// A member limited to the other organization cannot reconnect it.
+	if _, err := h.m.Begin(store.WithOrgs(ctx, []string{"org_other"}), Request{AccountID: accs[0].ID}); err != store.ErrNotFound {
+		t.Fatalf("reconnect outside the scope: %v", err)
+	}
+}

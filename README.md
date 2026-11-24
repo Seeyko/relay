@@ -4,6 +4,8 @@
 [MCP](https://modelcontextprotocol.io) server or a REST API. One static Go binary, one SQLite file,
 about 11 MB of RAM at idle. A lightweight, self-hosted alternative to tools like Postiz or Buffer.
 
+- **Organizations**: one instance for several brands or apps, each with as many accounts per network as needed
+  (three TikTok accounts for one app, one for another...). Members see only their organizations
 - Schedule posts and threads on several accounts at once, with images and videos
 - Publish on time (built-in scheduler, automatic retries on temporary errors)
 - **Analytics agents can act on**: metric snapshots over time (growth curves at 1h / 24h / 7d), follower growth,
@@ -99,6 +101,7 @@ connected through the `connect_account` tool or `POST /v1/accounts`.
 | `RELAY_S3_PUBLIC_URL` | | Public base URL of the bucket (custom domain or r2.dev). Empty: the bucket stays private and Relay serves media at `/media/` |
 | `RELAY_UI` | `on` | `off` disables the read-only dashboard at `/ui/` |
 | `RELAY_PASSKEY_REGISTRATION` | `on` | `off` refuses new passkeys, even with the API token (existing ones keep working) |
+| `RELAY_DEFAULT_ORG` | `Default` | Name of the first [organization](#organizations), created on first start (existing accounts go there). Rename it later with `update_organization` |
 | `RELAY_OWNER_EMAIL` | | Email of the first owner (see [Team](#team)). Fills an empty owner email; never replaces one |
 | `RELAY_RESEND_API_KEY`, `RELAY_EMAIL_FROM` | | Send invitations, sign-in links and approval codes with [Resend](https://resend.com), from e.g. `RideMyPark <no-reply@ridemypark.com>`. Both or neither. Without them, email features are off |
 | `RELAY_OAUTH` | `on` | `off` disables OAuth for agents (see [Connect an agent with OAuth](#connect-an-agent-with-oauth)). It is also off when the dashboard is off |
@@ -181,6 +184,30 @@ Upgrading from a single-owner instance: on start, existing passkeys, open sessio
 new `owner` member (with `RELAY_OWNER_EMAIL` as its email, if set; else set it later with `update_member`).
 Existing passkeys keep working. Without email configured, the Team sheet still lists members and changes roles.
 
+### Organizations
+
+An organization groups the accounts of one brand or app. It can hold any number of accounts per network, and
+everything hanging off an account follows it: posts, drafts, comments, metrics, browser tasks. Media belong to the
+organization they were uploaded for (their links stay public).
+
+- **Who sees what**: owners, `RELAY_API_TOKEN`, `RELAY_DRAFT_TOKEN` and the scheduler see every organization. Other
+  members see the organizations listed for them (`orgs` of `invite_member` / `update_member`, or the chips of the
+  Team sheet). Everything else answers "not found", exactly like an id that does not exist.
+- **Agents**: when a member approves an app with OAuth, they can limit it to one organization. Every tool takes an
+  optional `org` (id, slug or name) that limits the call; `X-Relay-Org: <org>` (or `/mcp?org=<org>` with a static
+  token) does it for a whole connection. `list_organizations` lists them. `sql_query` reads every organization, so
+  it only works for callers who see all of them, without `org`.
+- **New accounts** go to the organization of the call: `org`, or the only one the caller sees. With several and none
+  given, Relay asks for one. The same remote account cannot be connected in two organizations.
+- **Dashboard**: a switcher in the header filters the calendar, the drafts and the accounts (it shows when you see
+  at least two organizations). Owners create and rename organizations in the Team sheet; owners and admins move an
+  account from the Accounts sheet or with `move_account`.
+- **Team**: an admin limited to some organizations only manages members who see nothing else, and only gives access
+  to their own organizations. Organizations are created, renamed and removed by owners (`create_organization`,
+  `update_organization`, `delete_organization`, which needs it to be empty).
+- **Upgrading**: on start, an instance from before organizations gets one (`RELAY_DEFAULT_ORG`) holding every
+  account and media; members who are not owners get access to it, so nobody's view changes.
+
 ## Connect accounts with each network's sign-in
 
 Instead of pasting tokens, owners and admins connect an account with the network's own consent screen, and
@@ -234,6 +261,7 @@ claude mcp add --transport http relay https://<your-host>/mcp --header "Authoriz
 
 Tools:
 
+- Organizations: `list_organizations`, `create_organization`, `update_organization`, `delete_organization`, `move_account`; every tool also takes `org`
 - Accounts: `list_providers`, `list_accounts`, `connect_account`, `import_history`, `set_account_avatar`
 - Posts: `validate_post`, `schedule_post`, `list_posts`, `get_post`, `update_post`, `approve_post`, `delete_post`, `publish_now`, `upload_media_from_url`, `get_media` (public links of media, or of every media of a post, to show them to a person)
 - Deleting: `delete_post` removes the post from Relay only. `delete_post` with `remote: true` (REST:

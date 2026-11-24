@@ -15,6 +15,7 @@ import (
 func (ui *UI) registerAccounts(mux *http.ServeMux) {
 	mux.Handle("GET /ui/api/accounts", ui.headers(ui.admin(ui.accountsList)))
 	mux.Handle("POST /ui/api/accounts/connect", ui.headers(ui.post(ui.admin(ui.accountsConnect).ServeHTTP)))
+	mux.Handle("POST /ui/api/accounts/{id}/org", ui.headers(ui.post(ui.admin(ui.accountMove).ServeHTTP)))
 }
 
 // SessionUserID is the owner or admin signed in on r ("" otherwise): a start link they asked for from the
@@ -33,6 +34,8 @@ type accountRow struct {
 	Name      string `json:"name"`
 	Handle    string `json:"handle"`
 	Avatar    string `json:"avatar,omitempty"`
+	OrgID     string `json:"org_id"`
+	Org       string `json:"org"`
 	Reconnect string `json:"reconnect,omitempty"` // network slug, "" when none is configured
 	// SyncedAt is the last successful call to the network (metrics, counters); SyncError the last failure,
 	// shown only when it is newer than the last success.
@@ -57,7 +60,7 @@ func (ui *UI) accountsList(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := make([]accountRow, 0, len(accs))
 	for _, a := range accs {
-		row := accountRow{ID: a.ID, Provider: a.Provider, Name: a.Name, Handle: a.Handle, Avatar: a.Avatar}
+		row := accountRow{ID: a.ID, Provider: a.Provider, Name: a.Name, Handle: a.Handle, Avatar: a.Avatar, OrgID: a.OrgID, Org: a.Org}
 		if ui.Connect != nil {
 			row.Reconnect = ui.Connect.ReconnectNetwork(r.Context(), a)
 		}
@@ -86,14 +89,18 @@ func (ui *UI) accountsConnect(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Network   string `json:"network"`
 		AccountID string `json:"account_id"`
+		Org       string `json:"org"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		jsonErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	st, err := ui.Connect.Begin(r.Context(), connect.Request{Network: in.Network, AccountID: in.AccountID, UserID: userFrom(r).ID, Dashboard: true})
+	st, err := ui.Connect.Begin(r.Context(), connect.Request{Network: in.Network, AccountID: in.AccountID, UserID: userFrom(r).ID, Dashboard: true, Org: in.Org})
 	var inv *connect.ErrInvalid
 	switch {
+	case errors.Is(err, store.ErrOrgRequired):
+		jsonErr(w, http.StatusBadRequest, "pick an organization first (header switcher)")
+		return
 	case errors.As(err, &inv):
 		jsonErr(w, http.StatusBadRequest, inv.Msg)
 		return
@@ -105,4 +112,26 @@ func (ui *UI) accountsConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"url": st.URL, "expires_at": st.ExpiresAt})
+}
+
+// accountMove puts an account in another organization (both visible to the member).
+func (ui *UI) accountMove(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Org string `json:"org"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Org == "" {
+		jsonErr(w, http.StatusBadRequest, "give org")
+		return
+	}
+	a, err := ui.Store.MoveAccount(r.Context(), r.PathValue("id"), in.Org)
+	if errors.Is(err, store.ErrNotFound) {
+		jsonErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		jsonErr(w, 500, "storage error")
+		return
+	}
+	ui.audit(r, "account.move", a.ID, a.OrgID)
+	writeJSON(w, 200, map[string]any{"id": a.ID, "org_id": a.OrgID, "org": a.Org})
 }

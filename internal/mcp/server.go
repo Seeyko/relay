@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 
+	"github.com/Seeyko/relay/internal/core"
 	"github.com/Seeyko/relay/internal/store"
 )
 
@@ -19,22 +20,75 @@ type Server struct {
 	Version string
 	// ExtraInstructions is appended to the instructions sent to agents (e.g. the owner's timezone).
 	ExtraInstructions string
-	tools             []Tool
-	byName            map[string]Tool
+	// Store (optional) resolves the org argument every tool takes.
+	Store  *store.Store
+	tools  []Tool
+	byName map[string]Tool
 }
 
 func NewServer(name, version string, tools []Tool) *Server {
-	s := &Server{Name: name, Version: version, tools: tools, byName: map[string]Tool{}}
+	s := &Server{Name: name, Version: version, byName: map[string]Tool{}}
 	for _, t := range tools {
+		t = withOrgArg(t)
+		s.tools = append(s.tools, t)
 		s.byName[t.Name] = t
 	}
 	return s
+}
+
+// orgArgDoc describes the org argument added to every tool.
+const orgArgDoc = "Optional organization (id, slug or name from list_organizations): limits this call to it. New accounts and media go to it."
+
+// withOrgArg adds the optional org argument to a tool's schema (tools that use org themselves keep theirs).
+func withOrgArg(t Tool) Tool {
+	if t.OwnOrg {
+		return t
+	}
+	props, _ := t.InputSchema["properties"].(map[string]any)
+	if props == nil {
+		return t
+	}
+	if _, has := props["org"]; has {
+		return t
+	}
+	cp := map[string]any{}
+	for k, v := range props {
+		cp[k] = v
+	}
+	cp["org"] = str(orgArgDoc)
+	schema := map[string]any{}
+	for k, v := range t.InputSchema {
+		schema[k] = v
+	}
+	schema["properties"] = cp
+	t.InputSchema = schema
+	return t
+}
+
+// narrow applies the org argument of a call: every store read and write of the call is limited to it.
+func (s *Server) narrow(ctx context.Context, t Tool, args json.RawMessage) (context.Context, error) {
+	if t.OwnOrg || s.Store == nil || len(args) == 0 || args[0] != '{' {
+		return ctx, nil
+	}
+	var a struct {
+		Org string `json:"org"`
+	}
+	if json.Unmarshal(args, &a) != nil || a.Org == "" || a.Org == "all" {
+		return ctx, nil
+	}
+	o, err := s.Store.ResolveOrg(ctx, a.Org)
+	if err != nil {
+		return ctx, &core.ErrInvalid{Msg: "unknown organization " + a.Org + " (see list_organizations)"}
+	}
+	return store.WithOrgs(ctx, []string{o.ID}), nil
 }
 
 func (s *Server) Tools() []Tool { return s.tools }
 
 func (s *Server) instructions() string {
 	txt := "Relay manages social accounts and websites without a UI. Start with list_accounts. " +
+		"Accounts are grouped in organizations (one per brand or app, each with as many accounts per network as needed): " +
+		"list_organizations shows the ones you can use, and every tool takes an optional org to work in one of them. " +
 		"Times are RFC3339 with an explicit UTC offset. Never publish without the user's go-ahead: prefer scheduled_at='draft' when unsure. " +
 		"When the user asks for something Relay cannot do (a missing tool, filter, network, option or a bug), do not give up silently: " +
 		"call submit_feedback with the user's request, what you tried and what is missing (plus screenshots or examples as media). " +
@@ -53,6 +107,10 @@ func (s *Server) Call(ctx context.Context, name string, args json.RawMessage) (a
 	}
 	if t.Admin && RoleFrom(ctx) != RoleAdmin {
 		return nil, ErrForbidden
+	}
+	ctx, err := s.narrow(ctx, t, args)
+	if err != nil {
+		return nil, err
 	}
 	res, err := t.handler(ctx, args)
 	if isNil(res) {

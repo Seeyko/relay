@@ -150,6 +150,8 @@ func (s *Server) Register(mux *http.ServeMux) {
 type Access struct {
 	Scope  string
 	UserID string // the member who approved the app ("" for a grant made before team members)
+	// Orgs limits the app to these organizations (nil: every organization its member sees).
+	Orgs []string
 }
 
 // Authenticate checks an OAuth access token. The scope is capped by the current role of the member who approved
@@ -176,7 +178,7 @@ func (s *Server) Authenticate(ctx context.Context, token string) (Access, bool) 
 		}
 		scope = capped[0]
 	}
-	return Access{Scope: scope, UserID: a.UserID}, true
+	return Access{Scope: scope, UserID: a.UserID, Orgs: a.Orgs}, true
 }
 
 // ScopesFor is what a member with role may approve out of requested (most privileged first): owners and

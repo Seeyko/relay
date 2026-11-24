@@ -17,7 +17,9 @@ type Tool struct {
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"inputSchema"`
 	// Admin tools are hidden from and refused to drafter keys.
-	Admin   bool `json:"-"`
+	Admin bool `json:"-"`
+	// OwnOrg tools use the org argument themselves (it does not narrow the call).
+	OwnOrg  bool `json:"-"`
 	handler func(ctx context.Context, args json.RawMessage) (any, error)
 }
 

@@ -10,16 +10,16 @@ const T = FR
       nokey: "Ajoutez d'abord une passkey dans le tableau de bord.", cancelled: "Annulé.", failed: "Échec",
       expired: "Demande expirée. Relancez la connexion depuis l'app.", unsupported: "Ce navigateur ne gère pas les passkeys.",
       email: "Email", sendLink: "Recevoir un lien", sent: "Lien envoyé. Ouvrez-le, puis revenez ici.", code: "Code reçu par email",
-      confirm: "Confirmer", noRole: "Votre rôle ne permet pas d'autoriser une app." }
+      confirm: "Confirmer", noRole: "Votre rôle ne permet pas d'autoriser une app.", allOrgs: "Toutes les organisations" }
   : { signIn: "Sign in", full: "Full access", drafts: "Drafts only", approve: "Approve", deny: "Deny",
       nokey: "Add a passkey in the dashboard first.", cancelled: "Cancelled.", failed: "Failed",
       expired: "This request expired. Start again from the app.", unsupported: "This browser doesn't support passkeys.",
       email: "Email", sendLink: "Email me a link", sent: "Link sent. Open it, then come back here.", code: "Code sent by email",
-      confirm: "Confirm", noRole: "Your role cannot approve apps." };
+      confirm: "Confirm", noRole: "Your role cannot approve apps.", allOrgs: "All organizations" };
 const LABELS = { "relay:admin": T.full, "relay:drafts": T.drafts };
 
 const req = $("consent").dataset.req;
-let csrf = "", scope = "", assertion = null, method = "", polling = null;
+let csrf = "", scope = "", assertion = null, method = "", polling = null, org = "";
 
 function b64uToBuf(s) {
   s = s.replace(/-/g, "+").replace(/_/g, "/");
@@ -102,7 +102,7 @@ async function approve() {
   btn.disabled = true;
   try {
     const cred = await navigator.credentials.get({ publicKey: assertion });
-    const res = await call("/oauth/api/approve/finish", { req, csrf, scope, credential: encode(cred) });
+    const res = await call("/oauth/api/approve/finish", { req, csrf, scope, orgs: org ? [org] : [], credential: encode(cred) });
     done();
     location.assign(res.redirect);
   } catch (e) {
@@ -132,7 +132,7 @@ async function sendCode(ev) {
   btn.disabled = true;
   say("");
   try {
-    const res = await call("/oauth/api/approve/finish", { req, csrf, scope, code: input.value.trim() });
+    const res = await call("/oauth/api/approve/finish", { req, csrf, scope, orgs: org ? [org] : [], code: input.value.trim() });
     done();
     location.assign(res.redirect);
   } catch (e) { input.value = ""; fail(e); btn.disabled = false; }
@@ -180,6 +180,27 @@ function renderScopes(list) {
   }
 }
 
+// renderOrgs: with several organizations, the app can be limited to one of them.
+function renderOrgs(list) {
+  const box = $("orgs");
+  box.replaceChildren();
+  org = "";
+  box.hidden = !list || list.length < 2;
+  if (box.hidden) return;
+  for (const o of [{ id: "", name: T.allOrgs }, ...list]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.textContent = o.name;
+    b.setAttribute("aria-checked", String(o.id === org));
+    b.addEventListener("click", () => {
+      org = o.id;
+      for (const x of box.children) x.setAttribute("aria-checked", String(x === b));
+    });
+    box.append(b);
+  }
+}
+
 async function load() {
   let st;
   try { st = await call("/oauth/api/state", { req }); } catch (e) { return fail(e); }
@@ -192,6 +213,7 @@ async function load() {
     if (!st.can_approve) return say(T.noRole, true);
     if (!method) return nokey();
     renderScopes(st.scopes);
+    renderOrgs(st.orgs);
     $("ask").hidden = false;
     if (method === "passkey") prepare();
   } else if (st.has_passkeys || st.email) {

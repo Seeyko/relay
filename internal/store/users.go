@@ -101,6 +101,8 @@ type User struct {
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
 	Disabled    bool       `json:"disabled"`
 	Passkeys    int        `json:"passkeys"`
+	// Orgs are the organization ids the member sees; nil (omitted) for an owner, who sees all of them.
+	Orgs []string `json:"orgs,omitempty"`
 }
 
 // Invite is a pending invitation (the link itself is never stored).
@@ -112,6 +114,8 @@ type Invite struct {
 	InvitedBy string    `json:"invited_by,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// Orgs are the organizations the invitee will see (ignored for an owner).
+	Orgs []string `json:"orgs,omitempty"`
 }
 
 // AuthToken is a row of auth_tokens: an invitation, a sign-in link or an email code.
@@ -127,6 +131,7 @@ type AuthToken struct {
 	Attempts  int
 	CreatedAt time.Time
 	ExpiresAt time.Time
+	Orgs      []string // invitations: the organizations of the future member
 }
 
 // NormEmail lower-cases and trims an address.
@@ -239,11 +244,36 @@ func (s *Store) CreateUser(ctx context.Context, u *User) (*User, error) {
 	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
 		return nil, ErrEmailTaken
 	}
-	return u, err
+	if err != nil {
+		return nil, err
+	}
+	if u.Role != RoleOwner { // in its organizations (u.Orgs), else in the only one there is
+		ids := u.Orgs
+		if len(ids) == 0 {
+			if all, err := s.AllOrgIDs(ctx); err == nil && len(all) == 1 {
+				ids = all
+			}
+		}
+		if err := s.SetUserOrgs(ctx, u.ID, ids); err != nil {
+			return nil, err
+		}
+		u.Orgs = dedupe(ids)
+	}
+	return u, nil
 }
 
 func (s *Store) GetUser(ctx context.Context, id string) (*User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users u WHERE u.id=?`, id))
+	return s.withOrgs(ctx)(scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users u WHERE u.id=?`, id)))
+}
+
+// withOrgs fills the organizations of a user that was just read.
+func (s *Store) withOrgs(ctx context.Context) func(*User, error) (*User, error) {
+	return func(u *User, err error) (*User, error) {
+		if err != nil {
+			return nil, err
+		}
+		return u, s.fillUserOrgs(ctx, u)
+	}
 }
 
 func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
@@ -251,7 +281,7 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
 	if email == "" {
 		return nil, ErrNotFound
 	}
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users u WHERE u.email=?`, email))
+	return s.withOrgs(ctx)(scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM users u WHERE u.email=?`, email)))
 }
 
 // FirstOwner is the oldest owner: the one the API token registers passkeys for.
@@ -273,7 +303,11 @@ func (s *Store) ListUsers(ctx context.Context) ([]*User, error) {
 		}
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	return out, s.fillUserOrgs(ctx, out...)
 }
 
 // UserPatch is a change to a member; nil fields are kept.
@@ -282,6 +316,8 @@ type UserPatch struct {
 	Name     *string
 	Role     *string
 	Disabled *bool
+	// Orgs replaces the member's organizations (ids). Ignored for an owner.
+	Orgs *[]string
 }
 
 // UpdateUser applies p in one transaction and refuses to leave the instance without an active owner.
@@ -324,7 +360,21 @@ func (s *Store) UpdateUser(ctx context.Context, id string, p UserPatch) (*User, 
 			return nil, err
 		}
 	}
-	return u, tx.Commit()
+	switch {
+	case p.Orgs != nil && u.Role != RoleOwner:
+		if err := setUserOrgs(ctx, tx, id, *p.Orgs); err != nil {
+			return nil, err
+		}
+	case wasOwner && u.Role != RoleOwner:
+		// A former owner keeps seeing every organization that exists now.
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO org_members(org_id,user_id) SELECT id, ? FROM orgs`, id); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return u, s.fillUserOrgs(ctx, u)
 }
 
 // lastOwnerCheck fails when no active owner other than id would remain.
@@ -389,8 +439,8 @@ func (s *Store) CreateSession(ctx context.Context, tokenHash, userID, passkeyID,
 
 // SessionUser returns the active member of a live session.
 func (s *Store) SessionUser(ctx context.Context, tokenHash string) (*User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM user_sessions x JOIN users u ON u.id=x.user_id
-		WHERE x.token_hash=? AND x.expires_at > ? AND u.disabled=0`, tokenHash, time.Now().UTC()))
+	return s.withOrgs(ctx)(scanUser(s.db.QueryRowContext(ctx, `SELECT `+userCols+` FROM user_sessions x JOIN users u ON u.id=x.user_id
+		WHERE x.token_hash=? AND x.expires_at > ? AND u.disabled=0`, tokenHash, time.Now().UTC())))
 }
 
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) error {
@@ -419,8 +469,8 @@ func (s *Store) CreateAuthToken(ctx context.Context, t *AuthToken) error {
 	if t.UserID != "" {
 		uid = t.UserID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO auth_tokens(id,kind,token_hash,user_id,email,role,lang,invited_by,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.Kind, t.Hash, uid, t.Email, t.Role, t.Lang, t.InvitedBy, now, t.ExpiresAt.UTC())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO auth_tokens(id,kind,token_hash,user_id,email,role,lang,invited_by,created_at,expires_at,orgs) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Kind, t.Hash, uid, t.Email, t.Role, t.Lang, t.InvitedBy, now, t.ExpiresAt.UTC(), orgsJSON(t.Orgs))
 	return err
 }
 
@@ -428,7 +478,9 @@ func scanToken(r scanner) (*AuthToken, *time.Time, error) {
 	t := &AuthToken{}
 	var uid sql.NullString
 	var used sql.NullTime
-	err := r.Scan(&t.ID, &t.Kind, &t.Hash, &uid, &t.Email, &t.Role, &t.Lang, &t.InvitedBy, &t.Attempts, &t.CreatedAt, &t.ExpiresAt, &used)
+	var orgs string
+	err := r.Scan(&t.ID, &t.Kind, &t.Hash, &uid, &t.Email, &t.Role, &t.Lang, &t.InvitedBy, &t.Attempts, &t.CreatedAt, &t.ExpiresAt, &used, &orgs)
+	t.Orgs = parseOrgs(orgs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrNotFound
 	}
@@ -443,7 +495,7 @@ func scanToken(r scanner) (*AuthToken, *time.Time, error) {
 	return t, nil, nil
 }
 
-const tokenCols = `id,kind,token_hash,user_id,email,role,lang,invited_by,attempts,created_at,expires_at,used_at`
+const tokenCols = `id,kind,token_hash,user_id,email,role,lang,invited_by,attempts,created_at,expires_at,used_at,orgs`
 
 // PeekAuthToken returns a live, unused token of kind by hash, without using it.
 func (s *Store) PeekAuthToken(ctx context.Context, kind, hash string, now time.Time) (*AuthToken, error) {
@@ -505,6 +557,12 @@ func (s *Store) AcceptInvite(ctx context.Context, hash, name string, now time.Ti
 		}
 		return nil, err
 	}
+	if u.Role != RoleOwner {
+		if err := setUserOrgs(ctx, tx, u.ID, t.Orgs); err != nil {
+			return nil, err
+		}
+		u.Orgs = dedupe(t.Orgs)
+	}
 	// Other pending invitations to the same address are void now.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_tokens WHERE kind=? AND email=? AND used_at IS NULL`, TokenInvite, t.Email); err != nil {
 		return nil, err
@@ -514,7 +572,7 @@ func (s *Store) AcceptInvite(ctx context.Context, hash, name string, now time.Ti
 
 // ListInvites returns the pending invitations (not used, not expired), newest first.
 func (s *Store) ListInvites(ctx context.Context, now time.Time) ([]*Invite, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,email,role,lang,invited_by,created_at,expires_at FROM auth_tokens
+	rows, err := s.db.QueryContext(ctx, `SELECT id,email,role,lang,invited_by,created_at,expires_at,orgs FROM auth_tokens
 		WHERE kind=? AND used_at IS NULL AND expires_at > ? ORDER BY created_at DESC`, TokenInvite, now.UTC())
 	if err != nil {
 		return nil, err
@@ -523,9 +581,11 @@ func (s *Store) ListInvites(ctx context.Context, now time.Time) ([]*Invite, erro
 	out := []*Invite{}
 	for rows.Next() {
 		i := &Invite{}
-		if err := rows.Scan(&i.ID, &i.Email, &i.Role, &i.Lang, &i.InvitedBy, &i.CreatedAt, &i.ExpiresAt); err != nil {
+		var orgs string
+		if err := rows.Scan(&i.ID, &i.Email, &i.Role, &i.Lang, &i.InvitedBy, &i.CreatedAt, &i.ExpiresAt, &orgs); err != nil {
 			return nil, err
 		}
+		i.Orgs = parseOrgs(orgs)
 		out = append(out, i)
 	}
 	return out, rows.Err()
