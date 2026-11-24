@@ -23,7 +23,9 @@ const T = FR
       addPasskey: "Ajouter une passkey", signOut: "Se déconnecter", by: "par", noEmail: "Email non configuré",
       roles: { owner: "Propriétaire", admin: "Admin", editor: "Éditeur", viewer: "Lecteur" }, save: "OK",
       accounts: "Comptes", reconnect: "Reconnecter", synced: "Synchro", syncFailed: "Échec de synchro", neverSynced: "Jamais synchronisé", connectNet: "Connecter un réseau", noAccounts: "Aucun compte",
-      redirects: "URI de redirection", noNetworks: "Aucune connexion réseau configurée" }
+      redirects: "URI de redirection", noNetworks: "Aucune connexion réseau configurée",
+      allOrgs: "Toutes les organisations", orgs: "Organisations", newOrg: "Nouvelle organisation", rename: "Renommer",
+      pickOrg: "Choisissez d'abord une organisation en haut." }
   : { signIn: "Sign in", addKey: "Add a key", token: "API token", create: "Create", week: "Week", day: "Day",
       empty: "Nothing planned", cancelled: "Cancelled.", failed: "Failed", unsupported: "This browser doesn't support passkeys.",
       added: "Key added.", dup: "This key already exists.", open: "Open",
@@ -41,7 +43,9 @@ const T = FR
       addPasskey: "Add a passkey", signOut: "Sign out", by: "by", noEmail: "Email not configured",
       roles: { owner: "Owner", admin: "Admin", editor: "Editor", viewer: "Viewer" }, save: "OK",
       accounts: "Accounts", reconnect: "Reconnect", synced: "Synced", syncFailed: "Sync failed", neverSynced: "Never synced", connectNet: "Connect a network", noAccounts: "No accounts",
-      redirects: "Redirect URIs", noNetworks: "No network sign-in configured" };
+      redirects: "Redirect URIs", noNetworks: "No network sign-in configured",
+      allOrgs: "All organizations", orgs: "Organizations", newOrg: "New organization", rename: "Rename",
+      pickOrg: "Pick an organization at the top first." };
 const NET_NAMES = { x: "X", instagram: "Instagram", facebook: "Facebook", threads: "Threads", "linkedin-page": "LinkedIn",
   youtube: "YouTube", tiktok: "TikTok", website: "Website" };
 
@@ -71,7 +75,52 @@ const APPS_ICON = "M9 3v4M15 3v4M7 7h10v4a5 5 0 0 1-10 0zM12 16v5";
 const WARN_ICON = "M12 9v4m0 4h.01M10.3 3.9L2.4 18a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z";
 
 const mobile = matchMedia("(max-width: 760px)");
-const state = { me: null, view: "week", day: startOfDay(new Date()), posts: [], loadedFrom: null, drafts: [] };
+const state = { me: null, view: "week", day: startOfDay(new Date()), posts: [], loadedFrom: null, drafts: [], org: loadOrg() };
+
+// ---------- organizations ----------
+
+// The header switcher narrows the calendar, the drafts and the accounts to one organization ("" = all).
+function loadOrg() { try { return localStorage.getItem("relay.org") || ""; } catch { return ""; } }
+function saveOrg(v) { try { localStorage.setItem("relay.org", v); } catch { /* private mode */ } }
+function orgs() { return (state.me && state.me.orgs) || []; }
+function orgName(id) { const o = orgs().find((o) => o.id === id); return o ? o.name : ""; }
+// withOrg adds ?org= to the views the switcher filters.
+function withOrg(path) {
+  if (!state.org || !/^(calendar\?|drafts$|accounts$|posts\/)/.test(path)) return path;
+  return path + (path.includes("?") ? "&" : "?") + "org=" + encodeURIComponent(state.org);
+}
+
+function renderOrgSwitch() {
+  const sel = $("org-sel");
+  const list = orgs();
+  if (state.org && !list.some((o) => o.id === state.org)) { state.org = ""; saveOrg(""); }
+  sel.hidden = list.length < 2;
+  sel.replaceChildren();
+  if (sel.hidden) return;
+  const all = el("option", "", T.allOrgs); all.value = ""; sel.append(all);
+  for (const o of list) { const op = el("option", "", o.name); op.value = o.id; op.selected = o.id === state.org; sel.append(op); }
+}
+
+// orgChips: toggles for the organizations a member sees; onChange gets the new list of ids.
+function orgChips(selected, disabled, onChange) {
+  const box = el("div", "org-chips");
+  const cur = new Set(selected || []);
+  for (const o of orgs()) {
+    const b = el("button", "org-chip", o.name); b.type = "button";
+    b.setAttribute("aria-pressed", String(cur.has(o.id)));
+    b.disabled = disabled;
+    b.addEventListener("click", async () => {
+      const next = new Set(cur);
+      if (next.has(o.id)) next.delete(o.id); else next.add(o.id);
+      if (!next.size) return;
+      try { await onChange([...next]); } catch (e) { alert(e.message); return; }
+      if (cur.has(o.id)) cur.delete(o.id); else cur.add(o.id);
+      b.setAttribute("aria-pressed", String(cur.has(o.id)));
+    });
+    box.append(b);
+  }
+  return box;
+}
 
 // ---------- helpers ----------
 
@@ -117,7 +166,7 @@ async function api(path, { method = "GET", body, token } = {}) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = "Bearer " + token;
-  const res = await fetch("/ui/api/" + path, {
+  const res = await fetch("/ui/api/" + withOrg(path), {
     method, headers, credentials: "same-origin", cache: "no-store",
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -813,13 +862,19 @@ async function openTeam() {
     if (myRole !== "owner") role.querySelector('option[value="owner"]').remove();
     const go = el("button", "", T.invite); go.type = "submit";
     form.append(input, role, go);
+    let inviteOrgs = state.org ? [state.org] : orgs().slice(0, 1).map((o) => o.id);
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       go.disabled = true;
-      try { await api("team/invite", { method: "POST", body: { email: input.value.trim(), role: role.value, lang: FR ? "fr" : "en" } }); openTeam(); }
+      try { await api("team/invite", { method: "POST", body: { email: input.value.trim(), role: role.value, lang: FR ? "fr" : "en", orgs: inviteOrgs } }); openTeam(); }
       catch (e) { go.disabled = false; alert(e.message); }
     });
     parts.push(form);
+    if (orgs().length > 1) {
+      const chips = orgChips(inviteOrgs, false, (ids) => { inviteOrgs = ids; });
+      chips.classList.add("invite-orgs");
+      parts.push(chips);
+    }
   } else {
     parts.push(el("p", "app-meta pad", T.noEmail));
   }
@@ -834,6 +889,10 @@ async function openTeam() {
     if (m.name && m.email) meta.push(m.email);
     if (m.last_login_at) meta.push(day(m.last_login_at));
     if (meta.length) info.append(el("span", "app-meta", meta.join(" · ")));
+    if (m.role !== "owner" && orgs().length > 1) {
+      info.append(orgChips(m.orgs, m.id === meID, (ids) =>
+        api(`team/members/${encodeURIComponent(m.id)}`, { method: "POST", body: { orgs: ids } })));
+    }
     if (!m.email) {
       const f = el("form", "inline");
       const i = el("input"); i.type = "email"; i.required = true; i.placeholder = T.email;
@@ -866,14 +925,51 @@ async function openTeam() {
   for (const inv of data.invites) {
     const row = el("div", "app-row pending");
     const info = el("div", "app-info");
-    info.append(el("b", "", inv.email), el("span", "app-meta", `${T.invited} · ${T.roles[inv.role] || inv.role}`));
+    const invOrgs = (inv.orgs || []).map(orgName).filter(Boolean);
+    info.append(el("b", "", inv.email), el("span", "app-meta", [T.invited, T.roles[inv.role] || inv.role, ...invOrgs].join(" · ")));
     row.append(info);
     if (data.email) row.append(smallBtn(T.resend, "plain", async () => { await api(`team/invites/${encodeURIComponent(inv.id)}/resend`, { method: "POST", body: {} }); openTeam(); }));
     row.append(smallBtn(T.cancel, "", async () => { await api(`team/invites/${encodeURIComponent(inv.id)}/revoke`, { method: "POST", body: {} }); row.remove(); }));
     list.append(row);
   }
   parts.push(list);
+  if (state.me && state.me.manage_orgs) parts.push(...orgsAdmin());
   holder.replaceChildren(...parts);
+}
+
+// orgsAdmin: owners create and rename organizations.
+function orgsAdmin() {
+  const out = [el("div", "sheet-label", T.orgs)];
+  const list = el("div", "apps");
+  for (const o of orgs()) {
+    const row = el("div", "app-row");
+    const info = el("div", "app-info");
+    info.append(el("b", "", o.name), el("span", "app-meta", `${o.slug} · ${o.accounts} ${T.accounts.toLowerCase()}`));
+    row.append(info, smallBtn(T.rename, "plain", async () => {
+      const name = prompt(T.rename, o.name);
+      if (!name || name.trim() === o.name) return;
+      try { await api(`orgs/${encodeURIComponent(o.id)}`, { method: "POST", body: { name: name.trim() } }); await refreshMe(); openTeam(); }
+      catch (e) { alert(e.message); }
+    }));
+    list.append(row);
+  }
+  const form = el("form", "invite");
+  const input = el("input"); input.required = true; input.placeholder = T.newOrg; input.maxLength = 80;
+  const go = el("button", "", T.create); go.type = "submit";
+  form.append(input, go);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    go.disabled = true;
+    try { await api("orgs", { method: "POST", body: { name: input.value.trim() } }); await refreshMe(); openTeam(); }
+    catch (e) { go.disabled = false; alert(e.message); }
+  });
+  out.push(list, form);
+  return out;
+}
+
+async function refreshMe() {
+  try { state.me = await api("me"); } catch { /* keep */ }
+  renderOrgSwitch();
 }
 
 // ---------- accounts: connect and reconnect with each network ----------
@@ -929,9 +1025,19 @@ async function openAccounts() {
       pic.append(badge);
       const info = el("div", "app-info");
       info.append(el("b", "", a.name || a.handle || a.id),
-        el("span", "app-meta", [a.handle ? "@" + a.handle.replace(/^@/, "") : "", NET_NAMES[a.provider] || a.provider].filter(Boolean).join(" · ")));
+        el("span", "app-meta", [a.handle ? "@" + a.handle.replace(/^@/, "") : "", NET_NAMES[a.provider] || a.provider,
+          !state.org && orgs().length > 1 ? a.org : ""].filter(Boolean).join(" · ")));
       info.append(syncLine(a));
       row.append(pic, info);
+      if (orgs().length > 1) {
+        const mv = el("select", "role");
+        for (const o of orgs()) { const op = el("option", "", o.name); op.value = o.id; op.selected = o.id === a.org_id; mv.append(op); }
+        mv.addEventListener("change", async () => {
+          try { await api(`accounts/${encodeURIComponent(a.id)}/org`, { method: "POST", body: { org: mv.value } }); openAccounts(); }
+          catch (e) { mv.value = a.org_id; alert(e.message); }
+        });
+        row.append(mv);
+      }
       if (a.reconnect) row.append(smallBtn(T.reconnect, "plain", () => startConnection({ account_id: a.id })));
       list.append(row);
     }
@@ -948,7 +1054,8 @@ async function openAccounts() {
       b.append(ic, document.createTextNode(n.label));
       b.addEventListener("click", async () => {
         b.disabled = true;
-        try { await startConnection({ network: n.slug }); }
+        if (!state.org && orgs().length > 1) return alert(T.pickOrg);
+        try { await startConnection({ network: n.slug, org: state.org }); }
         catch (e) { b.disabled = false; if (e.status === 401) { $("preview").close(); showLogin(); } else alert(e.message); }
       });
       nets.append(b);
@@ -986,6 +1093,7 @@ async function afterLogin() {
     $("apps-btn").hidden = !me.apps;
     $("team-btn").hidden = !me.team;
     $("accounts-btn").hidden = !me.accounts;
+    renderOrgSwitch();
   } catch { /* keep */ }
 }
 
@@ -1024,6 +1132,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     load();
   });
   mobile.addEventListener("change", render);
+  $("org-sel").addEventListener("change", () => {
+    state.org = $("org-sel").value; saveOrg(state.org);
+    state.loadedFrom = null;
+    load(); loadDrafts();
+  });
 
   // Close the sheet by tapping the backdrop.
   $("preview").addEventListener("click", (e) => { if (e.target === e.currentTarget) e.currentTarget.close(); });
@@ -1057,6 +1170,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     $("team-btn").hidden = !me.team;
     $("accounts-btn").hidden = !me.accounts;
     if (me.logged_in) {
+      renderOrgSwitch();
       showApp();
       // Back from a network sign-in (/connect/...): show the accounts.
       if (location.hash === "#accounts" && me.accounts) { history.replaceState(null, "", location.pathname); openAccounts(); }

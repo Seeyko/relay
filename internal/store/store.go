@@ -162,6 +162,12 @@ var addedColumns = [][3]string{
 	{"passkeys", "user_id", "TEXT REFERENCES users(id) ON DELETE CASCADE"},
 	{"oauth_codes", "user_id", "TEXT"},
 	{"oauth_grants", "user_id", "TEXT"},
+	// organizations (orgs.go)
+	{"accounts", "org_id", "TEXT"},
+	{"media", "org_id", "TEXT"},
+	{"oauth_codes", "orgs", "TEXT NOT NULL DEFAULT ''"},
+	{"oauth_grants", "orgs", "TEXT NOT NULL DEFAULT ''"},
+	{"auth_tokens", "orgs", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func (s *Store) migrate() error {
@@ -177,6 +183,9 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(usersSchema); err != nil {
 		return err
 	}
+	if _, err := s.db.Exec(orgsSchema); err != nil {
+		return err
+	}
 	for _, c := range addedColumns {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c[0], c[1]).Scan(&n); err != nil {
@@ -188,7 +197,13 @@ func (s *Store) migrate() error {
 			}
 		}
 	}
-	return s.migrateUsers()
+	if err := s.migrateUsers(); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS accounts_org ON accounts(org_id)`); err != nil {
+		return err
+	}
+	return s.migrateOrgs()
 }
 
 // ---------- Accounts ----------
@@ -201,6 +216,9 @@ type Account struct {
 	RemoteUserID string    `json:"remote_user_id"`
 	Credentials  []byte    `json:"-"` // encrypted blob
 	CreatedAt    time.Time `json:"created_at"`
+	// OrgID is the organization of the account; Org is its name.
+	OrgID string `json:"org_id"`
+	Org   string `json:"org"`
 	// Avatar is the profile picture as /media/<file> on this Relay instance ("" when there is none).
 	Avatar string `json:"avatar,omitempty"`
 	// AvatarMediaID is the media library id of the profile picture.
@@ -218,31 +236,45 @@ const (
 	AvatarManual = "manual"
 )
 
+// CreateAccount stores a new account in a.OrgID (id, slug or name), or in the only organization ctx sees.
 func (s *Store) CreateAccount(ctx context.Context, a *Account) error {
+	o, err := s.TargetOrg(ctx, a.OrgID)
+	if err != nil {
+		return err
+	}
+	a.OrgID, a.Org = o.ID, o.Name
 	if a.ID == "" {
 		a.ID = NewID("acc")
 	}
 	a.CreatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO accounts(id,provider,name,handle,remote_user_id,credentials,created_at) VALUES(?,?,?,?,?,?,?)`,
-		a.ID, a.Provider, a.Name, a.Handle, a.RemoteUserID, a.Credentials, a.CreatedAt)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO accounts(id,provider,name,handle,remote_user_id,credentials,created_at,org_id) VALUES(?,?,?,?,?,?,?,?)`,
+		a.ID, a.Provider, a.Name, a.Handle, a.RemoteUserID, a.Credentials, a.CreatedAt, a.OrgID)
 	return err
 }
 
 // UpdateAccount saves the identity and credentials. The avatar columns have their own setters.
 func (s *Store) UpdateAccount(ctx context.Context, a *Account) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE accounts SET name=?, handle=?, remote_user_id=?, credentials=? WHERE id=?`,
-		a.Name, a.Handle, a.RemoteUserID, a.Credentials, a.ID)
-	return err
+	c, args := orgCond(ctx, "org_id")
+	res, err := s.db.ExecContext(ctx, `UPDATE accounts SET name=?, handle=?, remote_user_id=?, credentials=? WHERE id=?`+c,
+		append([]any{a.Name, a.Handle, a.RemoteUserID, a.Credentials, a.ID}, args...)...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 const accountSelect = `SELECT a.id,a.provider,a.name,a.handle,a.remote_user_id,a.credentials,a.created_at,
-a.avatar_media_id,a.avatar_source,a.avatar_checked_at,m.path FROM accounts a LEFT JOIN media m ON m.id=a.avatar_media_id`
+a.avatar_media_id,a.avatar_source,a.avatar_checked_at,m.path,COALESCE(a.org_id,''),COALESCE(o.name,'')
+FROM accounts a LEFT JOIN media m ON m.id=a.avatar_media_id LEFT JOIN orgs o ON o.id=a.org_id`
 
 func scanAccount(r scanner) (*Account, error) {
 	a := &Account{}
 	var mediaID, source, mpath sql.NullString
 	var checked sql.NullTime
-	if err := r.Scan(&a.ID, &a.Provider, &a.Name, &a.Handle, &a.RemoteUserID, &a.Credentials, &a.CreatedAt, &mediaID, &source, &checked, &mpath); err != nil {
+	if err := r.Scan(&a.ID, &a.Provider, &a.Name, &a.Handle, &a.RemoteUserID, &a.Credentials, &a.CreatedAt, &mediaID, &source, &checked, &mpath, &a.OrgID, &a.Org); err != nil {
 		return nil, err
 	}
 	a.AvatarMediaID, a.AvatarSource, a.AvatarCheckedAt = mediaID.String, source.String, nt(checked)
@@ -253,7 +285,8 @@ func scanAccount(r scanner) (*Account, error) {
 }
 
 func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
-	a, err := scanAccount(s.db.QueryRowContext(ctx, accountSelect+` WHERE a.id=?`, id))
+	c, args := orgCond(ctx, "a.org_id")
+	a, err := scanAccount(s.db.QueryRowContext(ctx, accountSelect+` WHERE a.id=?`+c, append([]any{id}, args...)...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -261,7 +294,8 @@ func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
 }
 
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
-	rows, err := s.db.QueryContext(ctx, accountSelect+` ORDER BY a.created_at`)
+	c, args := orgCond(ctx, "a.org_id")
+	rows, err := s.db.QueryContext(ctx, accountSelect+` WHERE 1=1`+c+` ORDER BY a.created_at`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +349,8 @@ func nullStr(s string) any {
 }
 
 func (s *Store) DeleteAccount(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`, id)
+	c, args := orgCond(ctx, "org_id")
+	res, err := s.db.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`+c, append([]any{id}, args...)...)
 	if err != nil {
 		return err
 	}
@@ -516,8 +551,9 @@ func (s *Store) SetImportedMedia(ctx context.Context, postID string, media []str
 func (s *Store) UpdatePost(ctx context.Context, p *Post) error {
 	p.UpdatedAt = time.Now().UTC()
 	p.NormalizePartMedia()
-	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?,parts=?,media=?,options=?,scheduled_at=?,published_at=?,remote_id=?,remote_ids=?,remote_url=?,error=?,attempts=?,next_attempt_at=?,metrics=?,metrics_at=?,updated_at=?,planned_at=?,part_media=? WHERE id=?`,
-		p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt, p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.UpdatedAt, p.PlannedAt, partMediaJSON(p.PartMedia), p.ID)
+	c, args := accountCond(ctx, "account_id")
+	res, err := s.db.ExecContext(ctx, `UPDATE posts SET status=?,parts=?,media=?,options=?,scheduled_at=?,published_at=?,remote_id=?,remote_ids=?,remote_url=?,error=?,attempts=?,next_attempt_at=?,metrics=?,metrics_at=?,updated_at=?,planned_at=?,part_media=? WHERE id=?`+c,
+		append([]any{p.Status, js(p.Parts), js(p.Media), js(p.Options), p.ScheduledAt, p.PublishedAt, p.RemoteID, js(p.RemoteIDs), p.RemoteURL, p.Error, p.Attempts, p.NextAttemptAt, js(p.Metrics), p.MetricsAt, p.UpdatedAt, p.PlannedAt, partMediaJSON(p.PartMedia), p.ID}, args...)...)
 	if err != nil {
 		return err
 	}
@@ -528,7 +564,8 @@ func (s *Store) UpdatePost(ctx context.Context, p *Post) error {
 }
 
 func (s *Store) GetPost(ctx context.Context, id string) (*Post, error) {
-	p, err := scanPost(s.db.QueryRowContext(ctx, `SELECT `+postCols+` FROM posts WHERE id=?`, id))
+	c, args := accountCond(ctx, "account_id")
+	p, err := scanPost(s.db.QueryRowContext(ctx, `SELECT `+postCols+` FROM posts WHERE id=?`+c, append([]any{id}, args...)...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -536,7 +573,8 @@ func (s *Store) GetPost(ctx context.Context, id string) (*Post, error) {
 }
 
 func (s *Store) DeletePost(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM posts WHERE id=?`, id)
+	c, args := accountCond(ctx, "account_id")
+	res, err := s.db.ExecContext(ctx, `DELETE FROM posts WHERE id=?`+c, append([]any{id}, args...)...)
 	if err != nil {
 		return err
 	}
@@ -574,6 +612,10 @@ func (s *Store) ListPosts(ctx context.Context, f PostFilter) ([]*Post, error) {
 	if f.Source != "" {
 		where = append(where, "source=?")
 		args = append(args, f.Source)
+	}
+	if c, cargs := accountCond(ctx, "account_id"); c != "" {
+		where = append(where, strings.TrimPrefix(c, " AND "))
+		args = append(args, cargs...)
 	}
 	if f.From != nil {
 		where = append(where, "COALESCE(published_at, scheduled_at, planned_at, created_at) >= ?")
@@ -660,6 +702,9 @@ type Media struct {
 	Size      int64     `json:"size"`
 	Path      string    `json:"-"`
 	CreatedAt time.Time `json:"created_at"`
+	// OrgID is the organization the media was uploaded for ("" when none: only callers who see every
+	// organization list it). Media links are public and work whatever the organization.
+	OrgID string `json:"org_id,omitempty"`
 }
 
 // S3Prefix marks a media Path that lives in the object store; the rest is the object key.
@@ -679,7 +724,15 @@ func (s *Store) CreateMedia(ctx context.Context, m *Media) error {
 		m.ID = NewID("med")
 	}
 	m.CreatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO media(id,filename,mime,size,path,created_at) VALUES(?,?,?,?,?,?)`, m.ID, m.Filename, m.Mime, m.Size, m.Path, m.CreatedAt)
+	if m.OrgID == "" {
+		// The only organization the caller sees; none when it sees several (it can still use the media anywhere).
+		if ids, limited := OrgsFrom(ctx); limited && len(ids) == 1 {
+			m.OrgID = ids[0]
+		} else if all, err := s.AllOrgIDs(ctx); err == nil && len(all) == 1 {
+			m.OrgID = all[0]
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO media(id,filename,mime,size,path,created_at,org_id) VALUES(?,?,?,?,?,?,?)`, m.ID, m.Filename, m.Mime, m.Size, m.Path, m.CreatedAt, nullStr(m.OrgID))
 	return err
 }
 
@@ -691,7 +744,9 @@ func (s *Store) DeleteMedia(ctx context.Context, id string) error {
 
 func (s *Store) GetMedia(ctx context.Context, id string) (*Media, error) {
 	m := &Media{}
-	err := s.db.QueryRowContext(ctx, `SELECT id,filename,mime,size,path,created_at FROM media WHERE id=?`, id).Scan(&m.ID, &m.Filename, &m.Mime, &m.Size, &m.Path, &m.CreatedAt)
+	var org sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id,filename,mime,size,path,created_at,org_id FROM media WHERE id=?`, id).Scan(&m.ID, &m.Filename, &m.Mime, &m.Size, &m.Path, &m.CreatedAt, &org)
+	m.OrgID = org.String
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -699,7 +754,8 @@ func (s *Store) GetMedia(ctx context.Context, id string) (*Media, error) {
 }
 
 func (s *Store) ListMedia(ctx context.Context) ([]*Media, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,filename,mime,size,path,created_at FROM media ORDER BY created_at DESC LIMIT 500`)
+	c, args := orgCond(ctx, "org_id")
+	rows, err := s.db.QueryContext(ctx, `SELECT id,filename,mime,size,path,created_at,org_id FROM media WHERE 1=1`+c+` ORDER BY created_at DESC LIMIT 500`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -707,9 +763,11 @@ func (s *Store) ListMedia(ctx context.Context) ([]*Media, error) {
 	out := []*Media{}
 	for rows.Next() {
 		m := &Media{}
-		if err := rows.Scan(&m.ID, &m.Filename, &m.Mime, &m.Size, &m.Path, &m.CreatedAt); err != nil {
+		var org sql.NullString
+		if err := rows.Scan(&m.ID, &m.Filename, &m.Mime, &m.Size, &m.Path, &m.CreatedAt, &org); err != nil {
 			return nil, err
 		}
+		m.OrgID = org.String
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -766,6 +824,10 @@ func (s *Store) ListComments(ctx context.Context, f CommentFilter) ([]*Comment, 
 	}
 	if f.OnlyPending {
 		where = append(where, "replied=0")
+	}
+	if c, cargs := accountCond(ctx, "account_id"); c != "" {
+		where = append(where, strings.TrimPrefix(c, " AND "))
+		args = append(args, cargs...)
 	}
 	q := `SELECT account_id,remote_id,post_id,author,text,url,created_at,seen_at,replied FROM comments`
 	if len(where) > 0 {
@@ -849,7 +911,8 @@ func (s *Store) ClaimTask(ctx context.Context) (*AgentTask, error) {
 }
 
 func (s *Store) GetTask(ctx context.Context, id string) (*AgentTask, error) {
-	t, err := scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskCols+` FROM agent_tasks WHERE id=?`, id))
+	c, args := accountCond(ctx, "account_id")
+	t, err := scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskCols+` FROM agent_tasks WHERE id=?`+c, append([]any{id}, args...)...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -872,10 +935,10 @@ func (s *Store) CompleteTask(ctx context.Context, id string, ok bool, result str
 }
 
 func (s *Store) ListTasks(ctx context.Context, status string) ([]*AgentTask, error) {
-	q := `SELECT ` + taskCols + ` FROM agent_tasks`
-	var args []any
+	c, args := accountCond(ctx, "account_id")
+	q := `SELECT ` + taskCols + ` FROM agent_tasks WHERE 1=1` + c
 	if status != "" {
-		q += ` WHERE status=?`
+		q += ` AND status=?`
 		args = append(args, status)
 	}
 	q += ` ORDER BY created_at DESC LIMIT 200`
@@ -938,16 +1001,22 @@ func (s *Store) snapshots(ctx context.Context, q string, args ...any) ([]Snapsho
 }
 
 func (s *Store) PostSnapshots(ctx context.Context, postID string) ([]Snapshot, error) {
-	return s.snapshots(ctx, `SELECT at, metrics FROM metric_snapshots WHERE post_id=? ORDER BY at`, postID)
+	c, args := accountCond(ctx, "account_id")
+	if c != "" {
+		c = ` AND post_id IN (SELECT id FROM posts WHERE 1=1` + c + `)`
+	}
+	return s.snapshots(ctx, `SELECT at, metrics FROM metric_snapshots WHERE post_id=?`+c+` ORDER BY at`, append([]any{postID}, args...)...)
 }
 
 func (s *Store) AccountSnapshots(ctx context.Context, accountID string, since time.Time) ([]Snapshot, error) {
-	return s.snapshots(ctx, `SELECT at, metrics FROM account_snapshots WHERE account_id=? AND at >= ? ORDER BY at`, accountID, since.UTC())
+	c, args := accountCond(ctx, "account_id")
+	return s.snapshots(ctx, `SELECT at, metrics FROM account_snapshots WHERE account_id=? AND at >= ?`+c+` ORDER BY at`, append([]any{accountID, since.UTC()}, args...)...)
 }
 
 // LatestAccountMetrics returns the counters of the newest snapshot of an account (nil when there is none).
 func (s *Store) LatestAccountMetrics(ctx context.Context, accountID string) (map[string]int64, error) {
-	sn, err := s.snapshots(ctx, `SELECT at, metrics FROM account_snapshots WHERE account_id=? ORDER BY at DESC LIMIT 1`, accountID)
+	c, args := accountCond(ctx, "account_id")
+	sn, err := s.snapshots(ctx, `SELECT at, metrics FROM account_snapshots WHERE account_id=?`+c+` ORDER BY at DESC LIMIT 1`, append([]any{accountID}, args...)...)
 	if err != nil || len(sn) == 0 {
 		return nil, err
 	}
@@ -967,6 +1036,9 @@ var forbiddenSQL = []string{"attach", "detach", "pragma", "vacuum", "load_extens
 // Query runs one read-only statement (SELECT / WITH) on a query_only connection.
 // Account credentials are never readable.
 func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult, error) {
+	if _, limited := OrgsFrom(ctx); limited {
+		return nil, ErrOrgScoped
+	}
 	lq := strings.ToLower(strings.TrimSpace(q))
 	if !strings.HasPrefix(lq, "select") && !strings.HasPrefix(lq, "with") {
 		return nil, errors.New("only SELECT or WITH queries are allowed")
@@ -1033,13 +1105,14 @@ func (s *Store) Query(ctx context.Context, q string, maxRows int) (*QueryResult,
 }
 
 // Schema is shown to agents so they can write queries.
-const Schema = `accounts(id, provider, name, handle, remote_user_id, created_at, avatar_media_id, avatar_source 'auto'|'manual', avatar_checked_at)
+const Schema = `orgs(id, slug, name, created_at)  -- organizations: one per brand or app
+accounts(id, org_id, provider, name, handle, remote_user_id, created_at, avatar_media_id, avatar_source 'auto'|'manual', avatar_checked_at)
 posts(id, group_id, account_id, status, parts JSON array, media JSON array (first part), part_media JSON array of arrays (media per part, [] when only the first part has media), options JSON, scheduled_at, planned_at (drafts only), published_at,
       remote_id, remote_ids JSON, remote_url, error, attempts, metrics JSON (latest), metrics_at, source 'relay'|'imported', created_at)
 metric_snapshots(post_id, at, metrics JSON)      -- one row per collection, for growth curves
 account_snapshots(account_id, at, metrics JSON)  -- followers, following, posts over time
 comments(account_id, remote_id, post_id, author, text, url, created_at, seen_at, replied 0|1)
-media(id, filename, mime, size, created_at)
+media(id, org_id, filename, mime, size, created_at)
 agent_tasks(id, account_id, kind, payload JSON, status, result, created_at, claimed_at, done_at)
 feedback(id, kind, title, body, media JSON, context JSON, source, role, status, resolution, pr_url, created_at, updated_at)
 Use json_extract(metrics, '$.like_count') to read a metric.`

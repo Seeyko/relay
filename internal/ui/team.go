@@ -23,6 +23,7 @@ func (ui *UI) registerTeam(mux *http.ServeMux) {
 	mux.Handle("POST /ui/api/team/members/{id}/remove", ui.headers(ui.post(ui.admin(ui.teamRemove).ServeHTTP)))
 	mux.Handle("POST /ui/api/team/invites/{id}/resend", ui.headers(ui.post(ui.admin(ui.teamResend).ServeHTTP)))
 	mux.Handle("POST /ui/api/team/invites/{id}/revoke", ui.headers(ui.post(ui.admin(ui.teamRevoke).ServeHTTP)))
+
 }
 
 // teamErr maps team and store errors to HTTP answers.
@@ -40,6 +41,8 @@ func teamErr(w http.ResponseWriter, err error) {
 		jsonErr(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrNotFound):
 		jsonErr(w, http.StatusNotFound, "not found")
+	case errors.Is(err, store.ErrOrgExists), errors.Is(err, store.ErrOrgNotEmpty), errors.Is(err, store.ErrOrgRequired):
+		jsonErr(w, http.StatusConflict, err.Error())
 	default:
 		jsonErr(w, 500, "storage error")
 	}
@@ -144,7 +147,7 @@ func (ui *UI) inviteAccept(w http.ResponseWriter, r *http.Request) {
 func (ui *UI) actor(r *http.Request) team.Actor { return team.ActorFor(userFrom(r), clientIP(r)) }
 
 func (ui *UI) teamList(w http.ResponseWriter, r *http.Request) {
-	us, inv, err := ui.Team.Members(r.Context())
+	us, inv, err := ui.Team.Members(r.Context(), ui.actor(r))
 	if err != nil {
 		teamErr(w, err)
 		return
@@ -154,9 +157,10 @@ func (ui *UI) teamList(w http.ResponseWriter, r *http.Request) {
 
 func (ui *UI) teamInvite(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Email string `json:"email"`
-		Role  string `json:"role"`
-		Lang  string `json:"lang"`
+		Email string   `json:"email"`
+		Role  string   `json:"role"`
+		Lang  string   `json:"lang"`
+		Orgs  []string `json:"orgs"`
 	}
 	if !decodeBody(w, r, &in) {
 		return
@@ -164,7 +168,12 @@ func (ui *UI) teamInvite(w http.ResponseWriter, r *http.Request) {
 	if in.Lang == "" {
 		in.Lang = email.Lang(r.Header.Get("Accept-Language"))
 	}
-	inv, err := ui.Team.Invite(r.Context(), ui.actor(r), in.Email, in.Role, in.Lang)
+	ids, err := ui.Store.ResolveOrgs(r.Context(), in.Orgs)
+	if err != nil {
+		jsonErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	inv, err := ui.Team.Invite(r.Context(), ui.actor(r), in.Email, in.Role, in.Lang, ids)
 	if err != nil {
 		teamErr(w, err)
 		return
@@ -174,15 +183,28 @@ func (ui *UI) teamInvite(w http.ResponseWriter, r *http.Request) {
 
 func (ui *UI) teamUpdate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Role     *string `json:"role"`
-		Disabled *bool   `json:"disabled"`
-		Email    *string `json:"email"`
-		Name     *string `json:"name"`
+		Role     *string   `json:"role"`
+		Disabled *bool     `json:"disabled"`
+		Email    *string   `json:"email"`
+		Name     *string   `json:"name"`
+		Orgs     *[]string `json:"orgs"`
 	}
 	if !decodeBody(w, r, &in) {
 		return
 	}
-	u, err := ui.Team.Update(r.Context(), ui.actor(r), r.PathValue("id"), team.Patch{Role: in.Role, Disabled: in.Disabled, Email: in.Email, Name: in.Name})
+	p := team.Patch{Role: in.Role, Disabled: in.Disabled, Email: in.Email, Name: in.Name}
+	if in.Orgs != nil {
+		ids, err := ui.Store.ResolveOrgs(r.Context(), *in.Orgs)
+		if err != nil {
+			jsonErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if ids == nil {
+			ids = []string{}
+		}
+		p.Orgs = &ids
+	}
+	u, err := ui.Team.Update(r.Context(), ui.actor(r), r.PathValue("id"), p)
 	if err != nil {
 		teamErr(w, err)
 		return
@@ -213,4 +235,66 @@ func (ui *UI) teamRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------- organizations (owners) ----------
+
+// owner is authed for owners only.
+func (ui *UI) owner(fn http.HandlerFunc) http.Handler {
+	return ui.authed(func(w http.ResponseWriter, r *http.Request) {
+		if u := userFrom(r); u == nil || u.Role != store.RoleOwner {
+			jsonErr(w, http.StatusForbidden, "owners only")
+			return
+		}
+		fn(w, r)
+	})
+}
+
+func (ui *UI) orgCreate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	}
+	if !decodeBody(w, r, &in) {
+		return
+	}
+	o, err := ui.Store.CreateOrg(r.Context(), in.Name, in.Slug)
+	if err != nil && !errors.Is(err, store.ErrOrgExists) {
+		jsonErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err != nil {
+		teamErr(w, err)
+		return
+	}
+	ui.audit(r, "org.create", o.ID, o.Name)
+	writeJSON(w, 200, map[string]any{"org": o})
+}
+
+func (ui *UI) orgUpdate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	}
+	if !decodeBody(w, r, &in) {
+		return
+	}
+	o, err := ui.Store.UpdateOrg(r.Context(), r.PathValue("id"), in.Name, in.Slug)
+	switch {
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrOrgExists):
+		teamErr(w, err)
+		return
+	case err != nil:
+		jsonErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ui.audit(r, "org.update", o.ID, o.Name)
+	writeJSON(w, 200, map[string]any{"org": o})
+}
+
+// audit records a dashboard change (when the team is configured).
+func (ui *UI) audit(r *http.Request, action, target, detail string) {
+	if ui.Team != nil {
+		ui.Team.Audit(r.Context(), ui.actor(r), action, target, detail)
+	}
 }

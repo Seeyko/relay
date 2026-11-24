@@ -28,10 +28,14 @@ func TeamTools(t *team.Team) []Tool {
 		{
 			Name:        "list_members",
 			Admin:       true,
-			Description: "List the dashboard members (id, email, name, role, last_login_at, disabled, passkeys) and the pending invitations. The email sign-in is available when email_enabled is true.",
+			Description: "List the dashboard members (id, email, name, role, orgs, last_login_at, disabled, passkeys) and the pending invitations. orgs are the organization ids a member sees (owners see all and have none listed). The email sign-in is available when email_enabled is true.",
 			InputSchema: obj(map[string]any{}),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
-				us, inv, err := t.Members(ctx)
+				who, err := actor(ctx, t)
+				if err != nil {
+					return nil, err
+				}
+				us, inv, err := t.Members(ctx, who)
 				if err != nil {
 					return nil, err
 				}
@@ -46,9 +50,13 @@ func TeamTools(t *team.Team) []Tool {
 				"email": str("their address"),
 				"role":  roleSchema,
 				"lang":  str("language of the email: en (default) or fr"),
+				"orgs":  strs("Organizations (id, slug or name) the member will see. Not for owners, who see all. Default: yours when you see only some, else the only organization"),
 			}, "email", "role"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
-				a, err := decode[struct{ Email, Role, Lang string }](raw)
+				a, err := decode[struct {
+					Email, Role, Lang string
+					Orgs              list
+				}](raw)
 				if err != nil {
 					return nil, err
 				}
@@ -56,7 +64,11 @@ func TeamTools(t *team.Team) []Tool {
 				if err != nil {
 					return nil, err
 				}
-				return t.Invite(ctx, who, a.Email, a.Role, a.Lang)
+				ids, err := t.Store.ResolveOrgs(ctx, a.Orgs)
+				if err != nil {
+					return nil, &team.ErrBadInput{Msg: err.Error()}
+				}
+				return t.Invite(ctx, who, a.Email, a.Role, a.Lang, ids)
 			},
 		},
 		{
@@ -69,6 +81,7 @@ func TeamTools(t *team.Team) []Tool {
 				"disabled": map[string]any{"type": "boolean"},
 				"email":    str("new address (lower-cased)"),
 				"name":     str("display name"),
+				"orgs":     strs("Replaces the organizations (id, slug or name) the member sees. Not for owners"),
 				"action":   map[string]any{"type": "string", "enum": []string{"resend", "revoke"}, "description": "pending invitations only"},
 			}, "id"),
 			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -78,6 +91,7 @@ func TeamTools(t *team.Team) []Tool {
 					Disabled *bool
 					Email    *string
 					Name     *string
+					Orgs     *list
 					Action   string
 				}](raw)
 				if err != nil {
@@ -99,7 +113,18 @@ func TeamTools(t *team.Team) []Tool {
 				default:
 					return nil, &team.ErrBadInput{Msg: "action must be resend or revoke"}
 				}
-				return t.Update(ctx, who, a.ID, team.Patch{Role: a.Role, Disabled: a.Disabled, Email: a.Email, Name: a.Name})
+				p := team.Patch{Role: a.Role, Disabled: a.Disabled, Email: a.Email, Name: a.Name}
+				if a.Orgs != nil {
+					ids, err := t.Store.ResolveOrgs(ctx, *a.Orgs)
+					if err != nil {
+						return nil, &team.ErrBadInput{Msg: err.Error()}
+					}
+					if ids == nil {
+						ids = []string{}
+					}
+					p.Orgs = &ids
+				}
+				return t.Update(ctx, who, a.ID, p)
 			},
 		},
 		{

@@ -64,6 +64,9 @@ type Request struct {
 	UserID string
 	// Dashboard is set when the member asked from the dashboard (the start link then goes on at once).
 	Dashboard bool
+	// Org is the organization (id, slug or name) a new account goes to. Begin resolves it to an id: the only
+	// organization the caller sees when empty, the account's own on a reconnection.
+	Org string
 }
 
 // Started is the link to open in a browser.
@@ -263,10 +266,19 @@ func (m *Manager) Begin(ctx context.Context, req Request) (*Started, error) {
 		if gerr != nil {
 			return nil, gerr
 		}
+		req.Org = acc.OrgID
 		n, err = m.forAccount(ctx, acc, req.Network)
 	} else if req.Network == "" {
 		return nil, invalid("give network (or account_id to reconnect an account)")
 	} else {
+		o, oerr := m.Svc.Store.TargetOrg(ctx, req.Org)
+		if errors.Is(oerr, store.ErrOrgRequired) {
+			return nil, invalid("%v", oerr)
+		}
+		if oerr != nil {
+			return nil, invalid("unknown organization %q (see list_organizations)", req.Org)
+		}
+		req.Org = o.ID
 		n, err = m.resolve(req.Network)
 	}
 	if err != nil {
@@ -617,8 +629,16 @@ func (m *Manager) stillAllowed(ctx context.Context, req Request) error {
 	return nil
 }
 
+// orgCtx limits the callback to the organization the sign-in was started for.
+func (m *Manager) orgCtx(r *http.Request, req Request) context.Context {
+	if req.Org == "" {
+		return r.Context()
+	}
+	return store.WithOrgs(r.Context(), []string{req.Org})
+}
+
 func (m *Manager) finishReconnect(w http.ResponseWriter, r *http.Request, n *Network, req Request, cands []Candidate) {
-	ctx := r.Context()
+	ctx := m.orgCtx(r, req)
 	acc, err := m.Svc.Store.GetAccount(ctx, req.AccountID)
 	if err != nil {
 		m.page(w, http.StatusNotFound, view{Error: "This account was removed from Relay."})
@@ -656,11 +676,16 @@ func (m *Manager) finishReconnect(w http.ResponseWriter, r *http.Request, n *Net
 }
 
 func (m *Manager) finishConnect(w http.ResponseWriter, r *http.Request, n *Network, req Request, c Candidate) {
-	ctx := r.Context()
-	// Already connected: update it in place rather than creating a duplicate.
-	if accs, err := m.Svc.Store.ListAccounts(ctx); err == nil {
+	ctx := m.orgCtx(r, req)
+	// Already connected: update it in place rather than creating a duplicate. The same remote account cannot
+	// belong to two organizations.
+	if accs, err := m.Svc.Store.ListAccounts(store.Unscoped(ctx)); err == nil {
 		for _, a := range accs {
 			if a.Provider == n.Connector && a.RemoteUserID != "" && a.RemoteUserID == c.RemoteID {
+				if req.Org != "" && a.OrgID != req.Org {
+					m.page(w, http.StatusConflict, view{Network: n.Slug, Error: accountLabel(a) + " is already connected in another organization. Nothing changed."})
+					return
+				}
 				updated, err := m.Svc.UpdateCredentials(ctx, a.ID, c.Creds)
 				if err != nil {
 					m.Log.Warn("connect: update of an already connected account failed", "account", a.ID, "err", scrub(err))

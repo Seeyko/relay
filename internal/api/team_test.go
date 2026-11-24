@@ -64,7 +64,8 @@ func newTeamAPI(t *testing.T) *tenv {
 	tm := team.New(st, rs, srv.URL, log)
 	box, _ := secret.New("k")
 	svc := &core.Service{Store: st, Box: box, MediaDir: dir + "/media", HTTP: http.DefaultClient, Log: log, BaseURL: srv.URL}
-	m := mcp.NewServer("relay", "test", append(mcp.BuildTools(svc), mcp.TeamTools(tm)...))
+	m := mcp.NewServer("relay", "test", append(append(mcp.BuildTools(svc), mcp.TeamTools(tm)...), mcp.OrgTools(st)...))
+	m.Store = st
 	e := &oenv{t: t, srv: srv, base: srv.URL, st: st, keys: &stubKeys{sessions: map[string]bool{}, has: true}, now: time.Now()}
 	as, err := oauth.New(srv.URL, st, e.keys, log)
 	if err != nil {
@@ -80,20 +81,27 @@ func newTeamAPI(t *testing.T) *tenv {
 // grant forges an approved OAuth app of member userID with scope and returns its access token.
 func (e *tenv) grant(userID, scope string) string {
 	e.t.Helper()
+	return e.grantOrgs(userID, scope, nil)
+}
+
+// grantOrgs is grant for an app limited to some organizations (nil: all the member sees).
+func (e *tenv) grantOrgs(userID, scope string, orgs []string) string {
+	e.t.Helper()
 	ctx := e.t.Context()
-	c := &store.OAuthClient{ID: "relay_c_" + userID + scope, Name: "App", RedirectURIs: []string{appRedirect}}
+	suffix := strings.Join(orgs, "")
+	c := &store.OAuthClient{ID: "relay_c_" + userID + scope + suffix, Name: "App", RedirectURIs: []string{appRedirect}}
 	if err := e.st.CreateOAuthClient(ctx, c); err != nil {
 		e.t.Fatal(err)
 	}
 	now := time.Now()
-	code := "code-" + userID + scope
+	code := "code-" + userID + scope + suffix
 	if err := e.st.CreateOAuthCode(ctx, &store.OAuthCode{Hash: code, ClientID: c.ID, RedirectURI: appRedirect, Challenge: "x", Scope: scope,
-		Resource: e.as.Resource(), UserID: userID, CreatedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+		Resource: e.as.Resource(), UserID: userID, CreatedAt: now, ExpiresAt: now.Add(time.Minute), Orgs: orgs}); err != nil {
 		e.t.Fatal(err)
 	}
-	tok := "relay_at_" + userID + strings.ReplaceAll(scope, ":", "")
+	tok := "relay_at_" + userID + strings.ReplaceAll(scope, ":", "") + suffix
 	h := sha256.Sum256([]byte(tok))
-	g := &store.OAuthGrant{ID: "ogr_" + userID + strings.ReplaceAll(scope, ":", ""), ExpiresAt: now.Add(time.Hour)}
+	g := &store.OAuthGrant{ID: "ogr_" + userID + strings.ReplaceAll(scope, ":", "") + suffix, ExpiresAt: now.Add(time.Hour)}
 	err := e.st.ExchangeOAuthCode(ctx, code, func(*store.OAuthCode) error { return nil }, g, func(g *store.OAuthGrant) []*store.OAuthToken {
 		return []*store.OAuthToken{{Hash: hex.EncodeToString(h[:]), GrantID: g.ID, Kind: store.TokenAccess, Scope: scope, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}}
 	})

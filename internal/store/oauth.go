@@ -80,6 +80,7 @@ type OAuthCode struct {
 	UserID      string // the member who approved
 	CreatedAt   time.Time
 	ExpiresAt   time.Time
+	Orgs        []string // organizations the app is limited to (nil: every one the member sees)
 }
 
 // OAuthGrant is one approved connection of an app. Deleting it revokes every token issued under it.
@@ -95,6 +96,8 @@ type OAuthGrant struct {
 	// UserID and ApprovedBy (name or email) are the member who approved the app.
 	UserID     string `json:"user_id,omitempty"`
 	ApprovedBy string `json:"approved_by,omitempty"`
+	// Orgs limits the app to these organizations (omitted: every organization its member sees).
+	Orgs []string `json:"orgs,omitempty"`
 }
 
 type OAuthToken struct {
@@ -117,6 +120,8 @@ type OAuthAccess struct {
 	UserID     string
 	UserRole   string
 	UserActive bool
+	// Orgs limits the app to these organizations (nil: every organization its member sees).
+	Orgs []string
 }
 
 func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
@@ -164,8 +169,8 @@ func (s *Store) CreateOAuthCode(ctx context.Context, c *OAuthCode) error {
 	if c.UserID != "" {
 		uid = c.UserID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO oauth_codes(code_hash,client_id,redirect_uri,challenge,scope,resource,created_at,expires_at,user_id) VALUES(?,?,?,?,?,?,?,?,?)`,
-		c.Hash, c.ClientID, c.RedirectURI, c.Challenge, c.Scope, c.Resource, c.CreatedAt.UTC(), c.ExpiresAt.UTC(), uid)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO oauth_codes(code_hash,client_id,redirect_uri,challenge,scope,resource,created_at,expires_at,user_id,orgs) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		c.Hash, c.ClientID, c.RedirectURI, c.Challenge, c.Scope, c.Resource, c.CreatedAt.UTC(), c.ExpiresAt.UTC(), uid, orgsJSON(c.Orgs))
 	return err
 }
 
@@ -192,9 +197,10 @@ func (s *Store) ExchangeOAuthCode(ctx context.Context, hash string, validate fun
 	c := &OAuthCode{Hash: hash}
 	var used sql.NullTime
 	var grantID, userID sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT client_id,redirect_uri,challenge,scope,resource,created_at,expires_at,used_at,grant_id,user_id FROM oauth_codes WHERE code_hash=?`, hash).
-		Scan(&c.ClientID, &c.RedirectURI, &c.Challenge, &c.Scope, &c.Resource, &c.CreatedAt, &c.ExpiresAt, &used, &grantID, &userID)
-	c.UserID = userID.String
+	var orgs string
+	err = tx.QueryRowContext(ctx, `SELECT client_id,redirect_uri,challenge,scope,resource,created_at,expires_at,used_at,grant_id,user_id,orgs FROM oauth_codes WHERE code_hash=?`, hash).
+		Scan(&c.ClientID, &c.RedirectURI, &c.Challenge, &c.Scope, &c.Resource, &c.CreatedAt, &c.ExpiresAt, &used, &grantID, &userID, &orgs)
+	c.UserID, c.Orgs = userID.String, parseOrgs(orgs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -222,9 +228,9 @@ func (s *Store) ExchangeOAuthCode(ctx context.Context, hash string, validate fun
 		}
 		return verr
 	}
-	g.ClientID, g.Scope, g.Resource, g.CreatedAt, g.UserID = c.ClientID, c.Scope, c.Resource, now, c.UserID
-	if _, err := tx.ExecContext(ctx, `INSERT INTO oauth_grants(id,client_id,scope,resource,created_at,expires_at,last_used_at,user_id) VALUES(?,?,?,?,?,?,?,?)`,
-		g.ID, g.ClientID, g.Scope, g.Resource, g.CreatedAt, g.ExpiresAt.UTC(), now, userID); err != nil {
+	g.ClientID, g.Scope, g.Resource, g.CreatedAt, g.UserID, g.Orgs = c.ClientID, c.Scope, c.Resource, now, c.UserID, c.Orgs
+	if _, err := tx.ExecContext(ctx, `INSERT INTO oauth_grants(id,client_id,scope,resource,created_at,expires_at,last_used_at,user_id,orgs) VALUES(?,?,?,?,?,?,?,?,?)`,
+		g.ID, g.ClientID, g.Scope, g.Resource, g.CreatedAt, g.ExpiresAt.UTC(), now, userID, orgsJSON(g.Orgs)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE oauth_codes SET grant_id=? WHERE code_hash=?`, g.ID, hash); err != nil {
@@ -294,10 +300,11 @@ func (s *Store) OAuthAccessToken(ctx context.Context, hash string, now time.Time
 	var last sql.NullTime
 	var uid, role sql.NullString
 	var disabled sql.NullBool
-	err := s.db.QueryRowContext(ctx, `SELECT t.grant_id,t.scope,t.expires_at,g.client_id,g.resource,g.expires_at,g.last_used_at,g.user_id,u.role,u.disabled
+	var orgs string
+	err := s.db.QueryRowContext(ctx, `SELECT t.grant_id,t.scope,t.expires_at,g.client_id,g.resource,g.expires_at,g.last_used_at,g.user_id,u.role,u.disabled,g.orgs
 		FROM oauth_tokens t JOIN oauth_grants g ON g.id=t.grant_id LEFT JOIN users u ON u.id=g.user_id WHERE t.token_hash=? AND t.kind=?`, hash, TokenAccess).
-		Scan(&a.GrantID, &a.Scope, &exp, &a.ClientID, &a.Resource, &gexp, &last, &uid, &role, &disabled)
-	a.UserID, a.UserRole = uid.String, role.String
+		Scan(&a.GrantID, &a.Scope, &exp, &a.ClientID, &a.Resource, &gexp, &last, &uid, &role, &disabled, &orgs)
+	a.UserID, a.UserRole, a.Orgs = uid.String, role.String, parseOrgs(orgs)
 	a.UserActive = role.Valid && !disabled.Bool
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -336,7 +343,7 @@ func (s *Store) RevokeOAuthToken(ctx context.Context, hash, clientID string) err
 func (s *Store) ListOAuthGrants(ctx context.Context) ([]*OAuthGrant, error) {
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM oauth_grants WHERE expires_at < ?`, time.Now().UTC())
 	rows, err := s.db.QueryContext(ctx, `SELECT g.id,g.client_id,c.name,g.scope,g.resource,g.created_at,g.expires_at,g.last_used_at,
-		COALESCE(g.user_id,''),COALESCE(NULLIF(u.name,''),u.email,'')
+		COALESCE(g.user_id,''),COALESCE(NULLIF(u.name,''),u.email,''),g.orgs
 		FROM oauth_grants g JOIN oauth_clients c ON c.id=g.client_id LEFT JOIN users u ON u.id=g.user_id ORDER BY g.created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -346,9 +353,11 @@ func (s *Store) ListOAuthGrants(ctx context.Context) ([]*OAuthGrant, error) {
 	for rows.Next() {
 		g := &OAuthGrant{}
 		var last sql.NullTime
-		if err := rows.Scan(&g.ID, &g.ClientID, &g.ClientName, &g.Scope, &g.Resource, &g.CreatedAt, &g.ExpiresAt, &last, &g.UserID, &g.ApprovedBy); err != nil {
+		var orgs string
+		if err := rows.Scan(&g.ID, &g.ClientID, &g.ClientName, &g.Scope, &g.Resource, &g.CreatedAt, &g.ExpiresAt, &last, &g.UserID, &g.ApprovedBy, &orgs); err != nil {
 			return nil, err
 		}
+		g.Orgs = parseOrgs(orgs)
 		if last.Valid {
 			t := last.Time
 			g.LastUsedAt = &t

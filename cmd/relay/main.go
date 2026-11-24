@@ -89,6 +89,9 @@ func run(log *slog.Logger) error {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
 	}
+	if n := os.Getenv("RELAY_DEFAULT_ORG"); n != "" {
+		store.DefaultOrgName = n // name of the first organization, created on first start
+	}
 	st, err := store.Open(filepath.Join(dataDir, "relay.db"))
 	if err != nil {
 		return err
@@ -155,7 +158,7 @@ func run(log *slog.Logger) error {
 		}
 		tm = team.New(st, mail, svc.BaseURL, log)
 	}
-	tools := mcp.BuildTools(svc)
+	tools := append(mcp.BuildTools(svc), mcp.OrgTools(st)...)
 	if tm != nil {
 		tools = append(tools, mcp.TeamTools(tm)...)
 	}
@@ -175,6 +178,7 @@ func run(log *slog.Logger) error {
 		}
 	}
 	server := mcp.NewServer("relay", version, tools)
+	server.Store = st
 	server.ExtraInstructions = os.Getenv("RELAY_AGENT_INSTRUCTIONS")
 	draft := os.Getenv("RELAY_DRAFT_TOKEN")
 	if draft != "" && (len(draft) < 16 || draft == token) {

@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
@@ -244,6 +245,8 @@ type consentIn struct {
 	Scope      string          `json:"scope"`
 	Credential json.RawMessage `json:"credential"`
 	Code       string          `json:"code"`
+	// Orgs limits the app to these organization ids (empty: every organization the member sees).
+	Orgs []string `json:"orgs"`
 }
 
 // consentCheck loads the request and checks the session, the CSRF token and that the member may approve.
@@ -305,6 +308,9 @@ func (s *Server) consentState(w http.ResponseWriter, r *http.Request) {
 		out["scopes"] = ScopesFor(m.Role, p.scopes)
 		out["can_approve"] = len(ScopesFor(m.Role, p.scopes)) > 0
 		out["method"] = s.freshMethod(m)
+		if orgs, err := s.memberOrgs(r.Context(), m); err == nil {
+			out["orgs"] = orgs
+		}
 	}
 	writeJSON(w, 200, out)
 }
@@ -356,6 +362,21 @@ func (s *Server) approveFinish(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, 400, "scope not allowed")
 		return
 	}
+	if len(in.Orgs) > 0 {
+		mine, err := s.memberOrgs(r.Context(), m)
+		if err != nil {
+			jsonErr(w, 500, "storage error")
+			return
+		}
+		ids := make([]string, len(mine))
+		for i, o := range mine {
+			ids[i] = o.ID
+		}
+		if !store.Subset(in.Orgs, ids) {
+			jsonErr(w, 400, "organization not allowed")
+			return
+		}
+	}
 	s.mu.Lock()
 	st, stSession, check := p.assertion, p.assertionSession, p.check
 	if check == "passkey" {
@@ -393,7 +414,7 @@ func (s *Server) approveFinish(w http.ResponseWriter, r *http.Request) {
 	now := s.Now()
 	if err := s.Store.CreateOAuthCode(r.Context(), &store.OAuthCode{
 		Hash: hashToken(code), ClientID: p.client.ID, RedirectURI: p.redirectURI, Challenge: p.challenge,
-		Scope: in.Scope, Resource: p.resource, UserID: m.ID, CreatedAt: now, ExpiresAt: now.Add(CodeTTL),
+		Scope: in.Scope, Resource: p.resource, UserID: m.ID, CreatedAt: now, ExpiresAt: now.Add(CodeTTL), Orgs: in.Orgs,
 	}); err != nil {
 		jsonErr(w, 500, "storage error")
 		return
@@ -419,4 +440,16 @@ func (s *Server) deny(w http.ResponseWriter, r *http.Request) {
 
 func jsonErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// memberOrgs lists the organizations the member sees (an app can be limited to some of them).
+func (s *Server) memberOrgs(ctx context.Context, m *Member) ([]*store.Org, error) {
+	ids, full, err := s.Store.UserOrgs(ctx, m.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !full {
+		ctx = store.WithOrgs(ctx, ids)
+	}
+	return s.Store.ListOrgs(ctx)
 }

@@ -58,10 +58,13 @@ type Actor struct {
 	Label  string // email or name, for the audit log and the invitation email
 	Role   string
 	IP     string
+	// Orgs are the organizations the actor sees; ignored when Full (owners and the API token see all of them).
+	Orgs []string
+	Full bool
 }
 
 // APIActor is the holder of RELAY_API_TOKEN (or an admin OAuth app approved before team members existed).
-func APIActor() Actor { return Actor{Label: "api", Role: store.RoleOwner} }
+func APIActor() Actor { return Actor{Label: "api", Role: store.RoleOwner, Full: true} }
 
 // ActorFor is a member acting from ip.
 func ActorFor(u *store.User, ip string) Actor {
@@ -72,7 +75,47 @@ func ActorFor(u *store.User, ip string) Actor {
 	if label == "" {
 		label = u.ID
 	}
-	return Actor{UserID: u.ID, Label: label, Role: u.Role, IP: ip}
+	return Actor{UserID: u.ID, Label: label, Role: u.Role, IP: ip, Orgs: u.Orgs, Full: u.Role == store.RoleOwner}
+}
+
+// sees reports whether the actor sees every organization of ids.
+func (a Actor) sees(ids []string) bool { return a.Full || store.Subset(ids, a.Orgs) }
+
+// canTouch: an actor limited to some organizations only manages members who see nothing else.
+func canTouch(a Actor, u *store.User) error {
+	if a.Full {
+		return nil
+	}
+	if u.Role == store.RoleOwner || !store.Subset(u.Orgs, a.Orgs) {
+		return &ErrDenied{"this member sees organizations you do not manage"}
+	}
+	return nil
+}
+
+// orgsFor checks the organizations given to a new or changed member: an actor gives only organizations it
+// sees, and a member who is not an owner needs at least one. With none given, a limited actor gives its own
+// and a full one the only organization there is.
+func (t *Team) orgsFor(ctx context.Context, a Actor, role string, ids []string) ([]string, error) {
+	if role == store.RoleOwner {
+		return nil, nil
+	}
+	if len(ids) == 0 {
+		if !a.Full {
+			return a.Orgs, nil
+		}
+		all, err := t.Store.AllOrgIDs(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(all) != 1 {
+			return nil, &ErrBadInput{"give orgs: the organizations this member will see (see list_organizations)"}
+		}
+		return all, nil
+	}
+	if !a.sees(ids) {
+		return nil, &ErrDenied{"you can only give access to organizations you see"}
+	}
+	return ids, nil
 }
 
 type Team struct {
@@ -193,28 +236,62 @@ func canGive(a Actor, role string) error {
 	return nil
 }
 
-// Members lists the members and the pending invitations.
-func (t *Team) Members(ctx context.Context) ([]*store.User, []*store.Invite, error) {
+// Members lists the members and the pending invitations. An actor limited to some organizations sees the
+// owners and the members who share one of them, with only those organizations listed.
+func (t *Team) Members(ctx context.Context, a Actor) ([]*store.User, []*store.Invite, error) {
 	us, err := t.Store.ListUsers(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
 	inv, err := t.Store.ListInvites(ctx, t.Now())
-	return us, inv, err
+	if err != nil || a.Full {
+		return us, inv, err
+	}
+	mine := func(ids []string) []string {
+		out := []string{}
+		for _, id := range ids {
+			if store.Subset([]string{id}, a.Orgs) {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	keptU := []*store.User{}
+	for _, u := range us {
+		if u.Role == store.RoleOwner || u.ID == a.UserID {
+			keptU = append(keptU, u)
+		} else if m := mine(u.Orgs); len(m) > 0 {
+			u.Orgs = m
+			keptU = append(keptU, u)
+		}
+	}
+	keptI := []*store.Invite{}
+	for _, i := range inv {
+		if m := mine(i.Orgs); len(m) > 0 {
+			i.Orgs = m
+			keptI = append(keptI, i)
+		}
+	}
+	return keptU, keptI, nil
 }
 
 // Invite emails an invitation to join with role. A pending invitation to the same address is replaced.
-func (t *Team) Invite(ctx context.Context, a Actor, addr, role, lang string) (*store.Invite, error) {
+// orgs are organization ids (see orgsFor).
+func (t *Team) Invite(ctx context.Context, a Actor, addr, role, lang string, orgs []string) (*store.Invite, error) {
 	if err := canManage(a); err != nil {
 		return nil, err
 	}
 	if err := canGive(a, role); err != nil {
 		return nil, err
 	}
+	orgs, err := t.orgsFor(ctx, a, role, orgs)
+	if err != nil {
+		return nil, err
+	}
 	if !t.EmailOn() {
 		return nil, ErrNoEmail
 	}
-	addr, err := cleanEmail(addr)
+	addr, err = cleanEmail(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -229,13 +306,13 @@ func (t *Team) Invite(ctx context.Context, a Actor, addr, role, lang string) (*s
 	tok := randomToken()
 	lang = email.Lang(lang)
 	row := &store.AuthToken{ID: store.NewID("inv"), Kind: store.TokenInvite, Hash: HashToken(tok), Email: addr, Role: role, Lang: lang,
-		InvitedBy: a.UserID, ExpiresAt: t.Now().Add(InviteTTL)}
+		InvitedBy: a.UserID, ExpiresAt: t.Now().Add(InviteTTL), Orgs: orgs}
 	if err := t.Store.CreateAuthToken(ctx, row); err != nil {
 		return nil, err
 	}
 	t.send(email.Invite(lang, addr, inviterName(a), role, t.BaseURL+"/ui/accept?token="+tok), "invite")
-	t.Audit(ctx, a, "invite", addr, "role="+role)
-	return &store.Invite{ID: row.ID, Email: addr, Role: role, Lang: lang, InvitedBy: a.UserID, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt}, nil
+	t.Audit(ctx, a, "invite", addr, "role="+role+" orgs="+strings.Join(orgs, ","))
+	return &store.Invite{ID: row.ID, Email: addr, Role: role, Lang: lang, InvitedBy: a.UserID, CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt, Orgs: orgs}, nil
 }
 
 func inviterName(a Actor) string {
@@ -260,6 +337,9 @@ func (t *Team) ResendInvite(ctx context.Context, a Actor, id string) (*store.Inv
 	if err := canGive(a, inv.Role); err != nil {
 		return nil, err
 	}
+	if !a.sees(inv.Orgs) {
+		return nil, store.ErrNotFound
+	}
 	tok := randomToken()
 	exp := t.Now().Add(InviteTTL)
 	if err := t.Store.RenewInvite(ctx, id, HashToken(tok), exp); err != nil {
@@ -267,7 +347,7 @@ func (t *Team) ResendInvite(ctx context.Context, a Actor, id string) (*store.Inv
 	}
 	t.send(email.Invite(inv.Lang, inv.Email, inviterName(a), inv.Role, t.BaseURL+"/ui/accept?token="+tok), "invite")
 	t.Audit(ctx, a, "invite.resend", inv.Email, "role="+inv.Role)
-	return &store.Invite{ID: inv.ID, Email: inv.Email, Role: inv.Role, Lang: inv.Lang, InvitedBy: inv.InvitedBy, ExpiresAt: exp}, nil
+	return &store.Invite{ID: inv.ID, Email: inv.Email, Role: inv.Role, Lang: inv.Lang, InvitedBy: inv.InvitedBy, ExpiresAt: exp, Orgs: inv.Orgs}, nil
 }
 
 // RevokeInvite deletes a pending invitation.
@@ -282,6 +362,9 @@ func (t *Team) RevokeInvite(ctx context.Context, a Actor, id string) error {
 	if err := canGive(a, inv.Role); err != nil {
 		return err
 	}
+	if !a.sees(inv.Orgs) {
+		return store.ErrNotFound
+	}
 	if err := t.Store.DeleteInvites(ctx, id, ""); err != nil {
 		return err
 	}
@@ -295,6 +378,8 @@ type Patch struct {
 	Disabled *bool
 	Email    *string
 	Name     *string
+	// Orgs replaces the organizations (ids) of a member who is not an owner.
+	Orgs *[]string
 }
 
 // Update changes a member's role, status, email or name.
@@ -305,12 +390,15 @@ func (t *Team) Update(ctx context.Context, a Actor, id string, p Patch) (*store.
 	}
 	self := a.UserID != "" && a.UserID == id
 	// Anyone may rename themselves; everything else is team management.
-	if !(self && p.Role == nil && p.Disabled == nil && p.Email == nil) {
+	if !(self && p.Role == nil && p.Disabled == nil && p.Email == nil && p.Orgs == nil) {
 		if err := canManage(a); err != nil {
 			return nil, err
 		}
 		if u.Role == store.RoleOwner && a.Role != store.RoleOwner {
 			return nil, &ErrDenied{"only an owner can change an owner"}
+		}
+		if err := canTouch(a, u); err != nil {
+			return nil, err
 		}
 	}
 	sp := store.UserPatch{Disabled: p.Disabled}
@@ -340,6 +428,26 @@ func (t *Team) Update(ctx context.Context, a Actor, id string, p Patch) (*store.
 	if p.Disabled != nil {
 		changes = append(changes, fmt.Sprintf("disabled=%v", *p.Disabled))
 	}
+	role := u.Role
+	if p.Role != nil {
+		role = *p.Role
+	}
+	if p.Orgs != nil || (u.Role == store.RoleOwner && role != store.RoleOwner) {
+		var want []string
+		if p.Orgs != nil {
+			want = *p.Orgs
+		}
+		if p.Orgs != nil || !a.Full {
+			ids, err := t.orgsFor(ctx, a, role, want)
+			if err != nil {
+				return nil, err
+			}
+			if role != store.RoleOwner {
+				sp.Orgs = &ids
+				changes = append(changes, "orgs="+strings.Join(ids, ","))
+			}
+		}
+	}
 	out, err := t.Store.UpdateUser(ctx, id, sp)
 	if err != nil {
 		return nil, err
@@ -362,6 +470,9 @@ func (t *Team) Remove(ctx context.Context, a Actor, id string) error {
 	}
 	if u.Role == store.RoleOwner && a.Role != store.RoleOwner {
 		return &ErrDenied{"only an owner can remove an owner"}
+	}
+	if err := canTouch(a, u); err != nil {
+		return err
 	}
 	if err := t.Store.DeleteUser(ctx, id); err != nil {
 		return err

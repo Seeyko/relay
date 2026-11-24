@@ -233,3 +233,12 @@ select.role:disabled { opacity: .6; }
 
 .sync { display: block; font-size: 12px; color: var(--muted); margin-top: 1px; }
 .sync.bad { color: var(--danger); }
+
+/* organizations */
+.org-sel { margin-right: 6px; max-width: 11em; font-weight: 600; }
+.org-sel[hidden] { display: none; }
+.org-chips { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 4px; }
+.org-chip { font-size: 12px; font-weight: 600; padding: 4px 9px; border-radius: 999px; background: var(--faint); color: var(--muted); }
+.org-chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.org-chip:disabled { opacity: .6; }
+.invite-orgs { padding: 0 0 12px; }
