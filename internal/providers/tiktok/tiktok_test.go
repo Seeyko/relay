@@ -381,6 +381,25 @@ func TestPublishPhoto(t *testing.T) {
 	}
 }
 
+// A PNG is pulled from its JPEG copy on Relay.
+func TestPublishPhotoPNG(t *testing.T) {
+	f := newFake(t)
+	f.on("POST /v2/post/publish/creator_info/query/", ok(creator))
+	f.on("POST /v2/post/publish/content/init/", ok(`{"publish_id":"p_1"}`))
+	f.on("POST /v2/post/publish/status/fetch/", ok(`{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[]}`))
+	c, _ := newClient(t, f, nil)
+	req := photoReq()
+	req.Media[0] = providers.MediaFile{Mime: "image/png", PublicURL: "https://media.example.com/a.png", JPEGURL: "https://relay.example/media/med_a.jpg"}
+	if _, err := c.Publish(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	body := jsonOf(t, f.find("POST /v2/post/publish/content/init/")[0].Body)
+	imgs := body["source_info"].(map[string]any)["photo_images"].([]any)
+	if imgs[0] != "https://relay.example/media/med_a.jpg" || imgs[1] != "https://media.example.com/b.webp" {
+		t.Errorf("photo_images %v", imgs)
+	}
+}
+
 func TestPrivacyNotOffered(t *testing.T) {
 	f := newFake(t)
 	f.on("POST /v2/post/publish/creator_info/query/", ok(`{"privacy_level_options":["SELF_ONLY"]}`))
@@ -480,6 +499,7 @@ func TestValidate(t *testing.T) {
 		{"caption ok", providers.PublishRequest{Parts: []string{strings.Repeat("😀", 1100)}, Media: []providers.MediaFile{fakeVideo(1)}, Options: pub}, ""},
 		{"ok photo", providers.PublishRequest{Media: []providers.MediaFile{img("image/jpeg")}, Options: pub}, ""},
 		{"png photo", providers.PublishRequest{Media: []providers.MediaFile{img("image/png")}, Options: pub}, "JPEG or WebP"},
+		{"png photo with jpeg copy", providers.PublishRequest{Media: []providers.MediaFile{{Mime: "image/png", JPEGURL: "https://relay.example/media/med_1.jpg"}}, Options: pub}, ""},
 		{"photo title", providers.PublishRequest{Media: []providers.MediaFile{img("image/webp")}, Options: map[string]any{"privacy_level": "SELF_ONLY", "title": strings.Repeat("a", 91)}}, "90"},
 		{"photo desc", providers.PublishRequest{Parts: []string{strings.Repeat("a", 4001)}, Media: []providers.MediaFile{img("image/webp")}, Options: pub}, "4000"},
 		{"36 photos", providers.PublishRequest{Media: make36(img("image/jpeg")), Options: pub}, "35"},

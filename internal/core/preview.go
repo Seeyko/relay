@@ -178,7 +178,7 @@ func (s *Service) PreviewPost(ctx context.Context, p *store.Post, acc *store.Acc
 				continue
 			}
 			shown[i] = append(shown[i], PreviewMedia{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size, Path: "/media/" + m.Key()})
-			files[i] = append(files[i], providers.MediaFile{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size, PublicURL: s.MediaURL(m),
+			files[i] = append(files[i], providers.MediaFile{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size, PublicURL: s.MediaURL(m), JPEGURL: s.JPEGURL(m),
 				Open: func() (io.ReadCloser, error) { return s.OpenMedia(ctx, m) }})
 		}
 	}

@@ -40,7 +40,7 @@ func init() {
 	providers.Register(providers.Factory{
 		Name: "tiktok",
 		Description: "TikTok via the Content Posting API (direct post) and Display API. Scopes: user.info.basic, user.info.profile, user.info.stats, " +
-			"video.publish, video.list. One video (MP4/MOV/WebM, max 4 GB) or 1-35 JPEG/WebP images (options.media_type=PHOTO; TikTok pulls them " +
+			"video.publish, video.list. One video (MP4/MOV/WebM, max 4 GB) or 1-35 JPEG/WebP images (PNG is converted to JPEG) (options.media_type=PHOTO; TikTok pulls them " +
 			"from RELAY_BASE_URL, which must be a domain or URL prefix verified in your TikTok app). posting_mode=inbox sends the media to the creator's TikTok inbox instead (video.upload scope, works for unaudited apps; the creator publishes in the app within 24 h; privacy and interactions are chosen there). Required option for direct posting: privacy_level " +
 			"(PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, FOLLOWER_OF_CREATOR or SELF_ONLY; TikTok forbids a default, ask the creator). " +
 			"Interactions are off unless enabled: disable_comment, disable_duet, disable_stitch default to true. Other options: title (photo, max 90), " +
@@ -108,8 +108,8 @@ func validate(req providers.PublishRequest) []string {
 			errs = append(errs, "TikTok photo posts take at most 35 images")
 		}
 		for _, m := range req.Media {
-			if !imageMimes[strings.ToLower(m.Mime)] {
-				errs = append(errs, "TikTok photo posts accept only JPEG or WebP images ("+m.Filename+" is "+m.Mime+")")
+			if !imageMimes[strings.ToLower(m.Mime)] && m.JPEGURL == "" {
+				errs = append(errs, "TikTok photo posts accept only JPEG or WebP images, or PNG converted by Relay with an https RELAY_BASE_URL ("+m.Filename+" is "+m.Mime+")")
 			}
 		}
 		if t, _ := o["title"].(string); utf16Len(t) > 90 {
@@ -588,7 +588,11 @@ func (c *Client) postPhotos(ctx context.Context, media []providers.MediaFile, te
 		if !strings.HasPrefix(m.PublicURL, "https://") {
 			return "", providers.Invalid("tiktok: photo posts need an https RELAY_BASE_URL on a domain verified in your TikTok app (TikTok pulls the images)")
 		}
-		urls = append(urls, m.PublicURL)
+		u := m.PublicURL
+		if !imageMimes[strings.ToLower(m.Mime)] && m.JPEGURL != "" {
+			u = m.JPEGURL // PNG: Relay serves a JPEG copy
+		}
+		urls = append(urls, u)
 	}
 	title, _ := o["title"].(string)
 	if title == "" {

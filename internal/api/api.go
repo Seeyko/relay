@@ -2,6 +2,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Seeyko/relay/internal/blob"
 	"github.com/Seeyko/relay/internal/connect"
@@ -53,6 +55,12 @@ func (a *API) Handler() http.Handler {
 			return
 		}
 		local := filepath.Join(a.Svc.MediaDir, name)
+		if id, ok := strings.CutSuffix(name, ".jpg"); ok && !strings.Contains(id, ".") {
+			// med_<id>.jpg: a JPEG copy of a PNG (TikTok photo posts pull only JPEG/WebP).
+			if a.serveJPEGCopy(w, r, id) {
+				return
+			}
+		}
 		if _, err := os.Stat(local); err == nil || a.Svc.Blob == nil {
 			http.ServeFile(w, r, local)
 			return
@@ -456,6 +464,25 @@ func (a *API) uploadMedia(w http.ResponseWriter, r *http.Request) {
 
 // serveFromBucket streams a media object from the bucket, forwarding Range so video players and
 // networks that download in chunks (Instagram, TikTok) work.
+// serveJPEGCopy answers GET /media/<id>.jpg for a PNG media (false: not such a media, serve the file as usual).
+func (a *API) serveJPEGCopy(w http.ResponseWriter, r *http.Request, id string) bool {
+	m, err := a.Svc.Store.GetMedia(r.Context(), id)
+	if err != nil || !strings.EqualFold(m.Mime, "image/png") {
+		return false
+	}
+	b, err := a.Svc.JPEGCopy(r.Context(), m)
+	if err != nil {
+		a.Log.Warn("media: jpeg copy failed", "id", id, "err", err)
+		http.Error(w, "media unavailable", http.StatusBadGateway)
+		return true
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable") // media ids never change
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, id+".jpg", time.Time{}, bytes.NewReader(b))
+	return true
+}
+
 func (a *API) serveFromBucket(w http.ResponseWriter, r *http.Request, key string) {
 	resp, err := a.Svc.Blob.Get(r.Context(), key, r.Header.Get("Range"))
 	if err != nil {
