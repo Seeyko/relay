@@ -242,3 +242,5 @@ select.role:disabled { opacity: .6; }
 .org-chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
 .org-chip:disabled { opacity: .6; }
 .invite-orgs { padding: 0 0 12px; }
+.connect-org { display: flex; align-items: center; gap: 8px; padding: 0 0 10px; font-size: 14px; color: var(--muted); }
+.connect-org select { max-width: 16em; font-weight: 600; color: var(--ink); }

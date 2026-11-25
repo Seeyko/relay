@@ -25,7 +25,7 @@ const T = FR
       accounts: "Comptes", reconnect: "Reconnecter", synced: "Synchro", syncFailed: "Échec de synchro", neverSynced: "Jamais synchronisé", connectNet: "Connecter un réseau", noAccounts: "Aucun compte",
       redirects: "URI de redirection", noNetworks: "Aucune connexion réseau configurée",
       allOrgs: "Toutes les organisations", orgs: "Organisations", newOrg: "Nouvelle organisation", rename: "Renommer",
-      pickOrg: "Choisissez d'abord une organisation en haut." }
+      connectIn: "Dans l'organisation" }
   : { signIn: "Sign in", addKey: "Add a key", token: "API token", create: "Create", week: "Week", day: "Day",
       empty: "Nothing planned", cancelled: "Cancelled.", failed: "Failed", unsupported: "This browser doesn't support passkeys.",
       added: "Key added.", dup: "This key already exists.", open: "Open",
@@ -45,7 +45,7 @@ const T = FR
       accounts: "Accounts", reconnect: "Reconnect", synced: "Synced", syncFailed: "Sync failed", neverSynced: "Never synced", connectNet: "Connect a network", noAccounts: "No accounts",
       redirects: "Redirect URIs", noNetworks: "No network sign-in configured",
       allOrgs: "All organizations", orgs: "Organizations", newOrg: "New organization", rename: "Rename",
-      pickOrg: "Pick an organization at the top first." };
+      connectIn: "In organization" };
 const NET_NAMES = { x: "X", instagram: "Instagram", facebook: "Facebook", threads: "Threads", "linkedin-page": "LinkedIn",
   youtube: "YouTube", tiktok: "TikTok", website: "Website" };
 
@@ -1047,6 +1047,17 @@ async function openAccounts() {
     parts.push(el("p", "app-meta pad", T.noNetworks));
   } else {
     parts.push(el("div", "sheet-label", T.connectNet));
+    // The new account goes to the organization picked here (the header one by default).
+    let target = state.org || (orgs()[0] || {}).id || "";
+    if (orgs().length > 1) {
+      const row = el("label", "connect-org");
+      const sel = el("select", "role");
+      sel.setAttribute("aria-label", T.connectIn);
+      for (const o of orgs()) { const op = el("option", "", o.name); op.value = o.id; op.selected = o.id === target; sel.append(op); }
+      sel.addEventListener("change", () => { target = sel.value; });
+      row.append(el("span", "", T.connectIn), sel);
+      parts.push(row);
+    }
     const nets = el("div", "net-btns");
     for (const n of data.networks) {
       const b = el("button", "net-btn"); b.type = "button";
@@ -1054,8 +1065,7 @@ async function openAccounts() {
       b.append(ic, document.createTextNode(n.label));
       b.addEventListener("click", async () => {
         b.disabled = true;
-        if (!state.org && orgs().length > 1) return alert(T.pickOrg);
-        try { await startConnection({ network: n.slug, org: state.org }); }
+        try { await startConnection({ network: n.slug, org: target }); }
         catch (e) { b.disabled = false; if (e.status === 401) { $("preview").close(); showLogin(); } else alert(e.message); }
       });
       nets.append(b);
