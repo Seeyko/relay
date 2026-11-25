@@ -2,7 +2,7 @@
 // "Reconnect"), instead of pasting tokens.
 //
 // Flow: an owner or admin asks for a connection (dashboard, MCP or REST) and gets a one-time start link
-// (10 minutes). GET /connect/{network}/start opens it: from the dashboard of the member who asked it goes on at
+// (1 hour). GET /connect/{network}/start opens it: from the dashboard of the member who asked it goes on at
 // once, else it shows a "Continue" button (a POST), so link previews in chat apps cannot use it. Relay then sends
 // the browser to the network with a random state (single use, 10 minutes), bound to that browser by an HttpOnly
 // SameSite=Lax cookie, and a PKCE challenge where the network supports it. GET /connect/{network}/callback
@@ -40,8 +40,12 @@ import (
 	"github.com/Seeyko/relay/internal/store"
 )
 
-// TTL bounds every step: the start link, the network's consent, the picker.
+// TTL bounds the steps after the click: the network's consent and the picker.
 const TTL = 10 * time.Minute
+
+// StartTTL bounds the start link: it is often handed to a human through a chat and opened later. It stays
+// single use, and a link preview cannot use it (Continue is a POST).
+const StartTTL = time.Hour
 
 const (
 	cookieBinding = "__Host-relay_connect"
@@ -285,7 +289,7 @@ func (m *Manager) Begin(ctx context.Context, req Request) (*Started, error) {
 		return nil, err
 	}
 	tok := randomToken()
-	exp := m.now().Add(TTL)
+	exp := m.now().Add(StartTTL)
 	m.mu.Lock()
 	m.sweep()
 	if len(m.starts) >= maxPending {
@@ -294,7 +298,7 @@ func (m *Manager) Begin(ctx context.Context, req Request) (*Started, error) {
 	}
 	m.starts[hashToken(tok)] = &start{net: n, req: req, expires: exp}
 	m.mu.Unlock()
-	note := "Open this link in a browser within 10 minutes (single use), then sign in on " + n.Label + "."
+	note := "Open this link in a browser within an hour (single use), then sign in on " + n.Label + "."
 	if req.AccountID != "" {
 		note += " Sign in with the same " + n.Label + " account: another one is refused."
 	}

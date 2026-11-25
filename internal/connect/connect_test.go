@@ -542,8 +542,13 @@ func TestExpiry(t *testing.T) {
 	h.fakeThreads()
 	// An expired start link.
 	st := h.begin(Request{Network: "threads"})
-	h.advance(TTL + time.Second)
+	h.advance(TTL + time.Second) // still valid after the consent TTL: links are handed over in chats
 	resp, _ := browser().Get(st.URL)
+	if page := read(t, resp); resp.StatusCode != 200 || !strings.Contains(page, "Continue") {
+		t.Fatalf("start link after 11 minutes: %d", resp.StatusCode)
+	}
+	h.advance(StartTTL)
+	resp, _ = browser().Get(st.URL)
 	if read(t, resp); resp.StatusCode != http.StatusGone {
 		t.Fatalf("expired start link: %d", resp.StatusCode)
 	}
