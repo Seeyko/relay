@@ -217,7 +217,7 @@ permissions of the first consent, so a new permission needs a new consent).
 - **Dashboard**: the **Accounts** sheet (link icon in the header, owners and admins only) lists the accounts with a
   **Reconnect** button, and a "Connect a network" button per configured network. It also lists the redirect URIs.
 - **Agents**: `start_account_connection` (admin keys) with `network`, or `account_id` to reconnect, returns a link
-  (single use, 10 minutes) to hand to a human. REST: `POST /v1/accounts/connect` `{"network": "threads"}`,
+  (single use, 1 hour) to hand to a human. REST: `POST /v1/accounts/connect` `{"network": "threads"}`,
   `POST /v1/accounts/{id}/reconnect`.
 - **Reconnect** must sign in the same remote account: another one is refused and nothing changes. The credentials are
   replaced in place (same checks as `update_account_credentials`), so posts and history stay attached. Connecting an
@@ -244,7 +244,7 @@ separated). PKCE is used where the network documents it for web apps (Google); M
 it only for other flows or native apps. Instagram accounts connected with Facebook Login reconnect through
 `instagram`, the others through `instagram-login`.
 
-Security: the start link and the network's `state` are random, single use and expire after 10 minutes. The state is
+Security: the start link and the network's `state` are random and single use; the start link expires after 1 hour, the `state` after 10 minutes. The state is
 bound to the browser that started the sign-in (an HttpOnly, SameSite=Lax cookie) and to the member who asked, who
 must still be an owner or admin when the network answers. A link handed out by an agent shows a **Continue** button
 (a same-origin POST), so chat link previews cannot use it. Tokens never appear in URLs shown to people, in pages or in

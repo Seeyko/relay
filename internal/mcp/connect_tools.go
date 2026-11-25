@@ -23,7 +23,7 @@ func ConnectTools(m *connect.Manager) []Tool {
 		Admin: true,
 		Description: "Start a sign-in with a network's own consent screen, to connect a new account or to reconnect one (new " +
 			"permissions, expired token) without pasting tokens. Returns url: give it to the human, who opens it in a browser " +
-			"within 10 minutes (single use) and signs in. With account_id, the network must sign in the same account; its " +
+			"within an hour (single use) and signs in. With account_id, the network must sign in the same account; its " +
 			"credentials are replaced in place, so posts and history stay attached. Facebook, Instagram and LinkedIn let the " +
 			"human pick the Page, Instagram account or organization. Configured networks: " + configured + ".",
 		InputSchema: obj(map[string]any{
