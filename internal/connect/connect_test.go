@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -196,7 +197,34 @@ func (h *harness) postForm(c *http.Client, path string, form url.Values, origin 
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	return resp
+	return h.openNext(c, resp)
+}
+
+var metaRefresh = regexp.MustCompile(`<meta http-equiv="refresh" content="0;url=([^"]+)">`)
+
+// openNext does what a browser does with the page after Continue: it opens the network's sign-in page, which
+// the page names in a meta refresh (no redirect, so the form-action CSP does not apply), with no form-action in
+// play. A page without one is returned as is.
+func (h *harness) openNext(c *http.Client, resp *http.Response) *http.Response {
+	h.t.Helper()
+	if resp.StatusCode != http.StatusOK {
+		return resp
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	m := metaRefresh.FindSubmatch(body)
+	if m == nil {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		return resp
+	}
+	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "form-action 'self'") {
+		h.t.Fatalf("CSP changed: %s", csp)
+	}
+	next, err := c.Get(html.UnescapeString(string(m[1])))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return next
 }
 
 func startToken(t *testing.T, st *Started) string {
@@ -542,10 +570,12 @@ func TestNullOriginSameSite(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "null")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	resp, err := browser().Do(req)
+	c := browser()
+	resp, err := c.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
+	resp = h.openNext(c, resp)
 	if page := read(t, resp); resp.StatusCode != 200 || !strings.Contains(page, "Threads connected") {
 		t.Fatalf("%d %s", resp.StatusCode, page)
 	}

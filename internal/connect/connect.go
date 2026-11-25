@@ -394,6 +394,8 @@ type view struct {
 	Cands  []option
 	Action string
 	Done   bool
+	// Next: the network's sign-in page, opened at once (after the Continue form)
+	Next string
 }
 
 type option struct {
@@ -495,7 +497,15 @@ func (m *Manager) redirectToNetwork(w http.ResponseWriter, r *http.Request, s *s
 	m.flows[key] = f
 	m.mu.Unlock()
 	m.setBinding(w, binding)
-	http.Redirect(w, r, authURL, http.StatusSeeOther)
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, authURL, http.StatusSeeOther)
+		return
+	}
+	// After the Continue form, a redirect would count as the form's target: browsers apply the page's
+	// form-action 'self' to it (and to the network's own redirects) and silently stay on the page, so a second
+	// click finds the link used. A page that moves on by itself is a plain navigation.
+	m.page(w, http.StatusOK, view{Title: "Opening " + s.net.Label, Network: s.net.Slug, Next: authURL,
+		Message: "Relay is opening " + s.net.Label + " to sign in."})
 }
 
 func (m *Manager) cookieName() string {
