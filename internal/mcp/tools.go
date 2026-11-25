@@ -207,7 +207,7 @@ func coreTools(svc *core.Service) []Tool {
 				"account_ids":  strs("Target account ids"),
 				"text":         str("Post text"),
 				"thread":       threadSchema(),
-				"media":        strs("Media ids from upload_media_from_url (media of the first part)"),
+				"media":        strs("Media ids from upload_media_from_url or create_media_upload (media of the first part)"),
 				"scheduled_at": str("RFC3339, 'now' or 'draft'"),
 				"planned_at":   str("Drafts only: intended publish time, RFC3339 with offset. Nothing is published until approve_post."),
 				"per_account":  map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": "account id -> text override"},
@@ -365,6 +365,41 @@ func coreTools(svc *core.Service) []Tool {
 					return nil, err
 				}
 				return svc.SaveMediaFromURL(ctx, a.URL)
+			},
+		},
+		{
+			Name: "create_media_upload",
+			Description: "Send a file from your own disk (a video or image you made) to Relay without a public URL. Returns an id " +
+				"and a one-time upload_url valid 1 hour: PUT the raw bytes to it with no Authorization header, e.g. " +
+				"curl -X PUT -H 'Content-Type: <mime>' --data-binary @<path> '<upload_url>' (the curl field is ready to run once " +
+				"@<file> points at your file). Then call finalize_media_upload with the id and use it in schedule_post media.",
+			InputSchema: obj(map[string]any{
+				"filename": str("File name with its extension, e.g. clip.mp4"),
+				"mime":     str("Mime type, e.g. video/mp4 or image/jpeg (guessed from the extension when omitted)"),
+				"size":     map[string]any{"type": "integer", "description": "Exact file size in bytes (e.g. stat -c %s <file>)"},
+			}, "filename", "size"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct {
+					Filename string `json:"filename"`
+					Mime     string `json:"mime"`
+					Size     int64  `json:"size"`
+				}](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.CreateMediaUpload(ctx, a.Filename, a.Mime, a.Size)
+			},
+		},
+		{
+			Name:        "finalize_media_upload",
+			Description: "Check that the file sent to a create_media_upload url arrived, and return the media (id, mime, size, public url).",
+			InputSchema: obj(map[string]any{"id": str("The id returned by create_media_upload (med_...)")}, "id"),
+			handler: func(ctx context.Context, raw json.RawMessage) (any, error) {
+				a, err := decode[struct{ ID string }](raw)
+				if err != nil {
+					return nil, err
+				}
+				return svc.FinalizeMediaUpload(ctx, a.ID)
 			},
 		},
 		{

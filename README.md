@@ -264,6 +264,11 @@ Tools:
 - Organizations: `list_organizations`, `create_organization`, `update_organization`, `delete_organization`, `move_account`; every tool also takes `org`
 - Accounts: `list_providers`, `list_accounts`, `connect_account`, `import_history`, `set_account_avatar`
 - Posts: `validate_post`, `schedule_post`, `list_posts`, `get_post`, `update_post`, `approve_post`, `delete_post`, `publish_now`, `upload_media_from_url`, `get_media` (public links of media, or of every media of a post, to show them to a person)
+- Local files (an agent with only the MCP connection and a file on its disk): `create_media_upload` (`filename`, `size`,
+  optional `mime`) returns a media `id` and a one-time `upload_url`, valid 1 hour. `PUT` the raw bytes to it with no
+  `Authorization` header (`curl -X PUT -H 'Content-Type: video/mp4' --data-binary @clip.mp4 '<upload_url>'`), then
+  `finalize_media_upload` with the id, and use the id in `schedule_post`. The URL carries a token sealed with
+  `RELAY_ENCRYPTION_KEY` (no server state), accepts exactly `size` bytes once, and needs `RELAY_BASE_URL`.
 - Deleting: `delete_post` removes the post from Relay only. `delete_post` with `remote: true` (REST:
   `DELETE /v1/posts/{id}?remote=true`) first deletes the published post from the network, with every part of its
   thread: X and Threads delete each reply, last first; Facebook and LinkedIn delete the post, which removes the
@@ -411,6 +416,9 @@ Every route except `/healthz`, `/media/*` and the dashboard (`/ui/`, its own pas
 | POST | `/v1/posts/validate` | `validate_post` |
 | POST | `/v1/posts/{id}/approve` | `approve_post` |
 | GET / POST | `/v1/media` | list (each with its public `url`) / upload (multipart `file` or JSON `{"url"}`) |
+| POST | `/v1/media/uploads` | `create_media_upload` (`{"filename", "size", "mime"}`) |
+| PUT | `/v1/uploads/{token}` | the `upload_url`: raw file bytes, **no token** (the URL is the authorization) |
+| POST | `/v1/media/{id}/finalize` | `finalize_media_upload` |
 | GET | `/v1/media/{id}` | `get_media` (metadata and public `url`; comma-separated ids work) |
 | GET | `/v1/posts/{id}/media` | `get_media` with `post`: the post's media in publishing order |
 | GET / POST | `/v1/agent/tasks` | `list_browser_tasks` / `create_browser_task` |

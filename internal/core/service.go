@@ -1179,18 +1179,32 @@ func (s *Service) recordSync(ctx context.Context, accountID string, err error) {
 const maxMedia = 512 << 20
 
 func (s *Service) SaveMedia(ctx context.Context, r io.Reader, filename, mimeType string) (*store.Media, error) {
-	if err := os.MkdirAll(s.MediaDir, 0o755); err != nil {
-		return nil, err
-	}
-	id := store.NewID("med")
-	ext := strings.ToLower(filepath.Ext(filename))
+	return s.saveMedia(ctx, r, filename, mimeType, store.NewID("med"), "")
+}
+
+// mediaType is the mime type of a file to store (guessed from the extension when missing), or an error
+// when it is neither an image nor a video.
+func mediaType(filename, mimeType string) (string, error) {
 	if mimeType == "" || mimeType == "application/octet-stream" {
-		if t := mime.TypeByExtension(ext); t != "" {
+		if t := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename))); t != "" {
 			mimeType = t
 		}
 	}
 	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "video/") {
-		return nil, invalid("unsupported media type %q (images and videos only)", mimeType)
+		return "", invalid("unsupported media type %q (images and videos only)", mimeType)
+	}
+	return mimeType, nil
+}
+
+// saveMedia stores a file under a given media id. orgID "" lets the store pick the caller's organization.
+func (s *Service) saveMedia(ctx context.Context, r io.Reader, filename, mimeType, id, orgID string) (*store.Media, error) {
+	if err := os.MkdirAll(s.MediaDir, 0o755); err != nil {
+		return nil, err
+	}
+	ext := strings.ToLower(filepath.Ext(filename))
+	mimeType, err := mediaType(filename, mimeType)
+	if err != nil {
+		return nil, err
 	}
 	dst := filepath.Join(s.MediaDir, id+ext)
 	f, err := os.Create(dst)
@@ -1212,7 +1226,7 @@ func (s *Service) SaveMedia(ctx context.Context, r io.Reader, filename, mimeType
 	if filename == "" {
 		filename = id + ext
 	}
-	m := &store.Media{ID: id, Filename: filepath.Base(filename), Mime: mimeType, Size: n, Path: dst}
+	m := &store.Media{ID: id, Filename: filepath.Base(filename), Mime: mimeType, Size: n, Path: dst, OrgID: orgID}
 	if s.Blob != nil {
 		// Upload to the bucket, then drop the local copy.
 		key := id + ext

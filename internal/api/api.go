@@ -68,6 +68,16 @@ func (a *API) Handler() http.Handler {
 		a.serveFromBucket(w, r, name)
 	})
 
+	// One-time upload URLs from create_media_upload: the sealed token in the path is the authorization.
+	mux.HandleFunc("PUT /v1/uploads/{token}", func(w http.ResponseWriter, r *http.Request) {
+		m, err := a.Svc.ReceiveMediaUpload(r.Context(), r.PathValue("token"), r.Body)
+		if err != nil {
+			a.fail(w, err)
+			return
+		}
+		writeJSON(w, 201, map[string]any{"media": m, "url": a.Svc.MediaURL(m)})
+	})
+
 	if a.UI != nil {
 		a.UI.Register(mux)
 		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/ui/", http.StatusFound) })
@@ -192,6 +202,8 @@ func (a *API) Handler() http.Handler {
 	authed.HandleFunc("GET /v1/media/{id}", a.tool("get_media", map[string]string{"id": "ids"}))
 	authed.HandleFunc("GET /v1/posts/{id}/media", a.tool("get_media", map[string]string{"id": "post"}))
 	authed.HandleFunc("POST /v1/media", a.uploadMedia)
+	authed.HandleFunc("POST /v1/media/uploads", a.tool("create_media_upload", nil))
+	authed.HandleFunc("POST /v1/media/{id}/finalize", a.tool("finalize_media_upload", map[string]string{"id": "id"}))
 
 	// Feedback: agents ask for missing capabilities, maintainer agents turn them into PRs.
 	authed.HandleFunc("POST /v1/feedback", a.tool("submit_feedback", nil))
@@ -412,6 +424,8 @@ func (a *API) fail(w http.ResponseWriter, err error) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 	case errors.Is(err, store.ErrOrgExists), errors.Is(err, store.ErrOrgNotEmpty):
 		writeJSON(w, 409, map[string]string{"error": err.Error()})
+	case errors.Is(err, core.ErrUploadDenied):
+		writeJSON(w, 403, map[string]string{"error": err.Error()})
 	case errors.Is(err, mcp.ErrForbidden):
 		writeJSON(w, 403, map[string]string{"error": err.Error()})
 	case errors.Is(err, mcp.ErrUnknownTool):
