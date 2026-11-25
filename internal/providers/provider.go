@@ -30,7 +30,10 @@ type MediaFile struct {
 	Open     func() (io.ReadCloser, error)
 	// PublicURL is where the network can download the file (needed by Instagram, which pulls media).
 	PublicURL string
-	Alt       string
+	// JPEGURL (PNG images only) is a JPEG copy of the image on Relay's own domain, for networks that pull only
+	// JPEG or WebP (TikTok photo posts). Empty when there is no https RELAY_BASE_URL.
+	JPEGURL string
+	Alt     string
 }
 
 // PublishRequest is one post (or thread) for one account.

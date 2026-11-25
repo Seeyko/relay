@@ -10,6 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log/slog"
 	"mime"
@@ -536,7 +540,7 @@ func (s *Service) mediaFiles(ctx context.Context, ids []string) ([]providers.Med
 		}
 		out = append(out, providers.MediaFile{ID: m.ID, Filename: m.Filename, Mime: m.Mime, Size: m.Size,
 			Open:      func() (io.ReadCloser, error) { return s.OpenMedia(ctx, m) },
-			PublicURL: s.MediaURL(m)})
+			PublicURL: s.MediaURL(m), JPEGURL: s.JPEGURL(m)})
 	}
 	return out, nil
 }
@@ -1288,6 +1292,40 @@ func (s *Service) MediaURL(m *store.Media) string {
 		return ""
 	}
 	return strings.TrimRight(s.BaseURL, "/") + "/media/" + m.Key()
+}
+
+// JPEGURL is the link of a JPEG copy of a PNG image, served by Relay itself (GET /media/<id>.jpg): TikTok photo
+// posts take only JPEG or WebP, pulled from a domain verified in the TikTok app. "" for other media or without
+// an https base URL.
+func (s *Service) JPEGURL(m *store.Media) string {
+	if !strings.EqualFold(m.Mime, "image/png") || !strings.HasPrefix(s.BaseURL, "https://") {
+		return ""
+	}
+	return strings.TrimRight(s.BaseURL, "/") + "/media/" + m.ID + ".jpg"
+}
+
+// JPEGCopy converts a PNG media to JPEG (transparency on white, quality 92).
+func (s *Service) JPEGCopy(ctx context.Context, m *store.Media) ([]byte, error) {
+	if !strings.EqualFold(m.Mime, "image/png") {
+		return nil, store.ErrNotFound
+	}
+	f, err := s.OpenMedia(ctx, m)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	src, err := png.Decode(io.LimitReader(f, 64<<20))
+	if err != nil {
+		return nil, fmt.Errorf("media %s: %w", m.ID, err)
+	}
+	dst := image.NewRGBA(src.Bounds())
+	draw.Draw(dst, dst.Bounds(), image.White, image.Point{}, draw.Src)
+	draw.Draw(dst, dst.Bounds(), src, src.Bounds().Min, draw.Over)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 92}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // ---------- webhooks ----------
