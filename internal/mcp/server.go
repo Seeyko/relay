@@ -90,6 +90,7 @@ func (s *Server) instructions() string {
 		"Accounts are grouped in organizations (one per brand or app, each with as many accounts per network as needed): " +
 		"list_organizations shows the ones you can use, and every tool takes an optional org to work in one of them. " +
 		"Times are RFC3339 with an explicit UTC offset. Never publish without the user's go-ahead: prefer scheduled_at='draft' when unsure. " +
+		"To post a file from your own disk, call create_media_upload, PUT the file to its upload_url, then finalize_media_upload: no public URL needed. " +
 		"When the user asks for something Relay cannot do (a missing tool, filter, network, option or a bug), do not give up silently: " +
 		"call submit_feedback with the user's request, what you tried and what is missing (plus screenshots or examples as media). " +
 		"The maintainers' agents read it and open a pull request."
