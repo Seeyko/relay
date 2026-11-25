@@ -170,6 +170,9 @@ func (ui *UI) headers(next http.Handler) http.Handler {
 		}
 		if strings.HasPrefix(r.URL.Path, "/ui/api/") || r.URL.Path == "/ui/accept" || r.URL.Path == "/ui/signin" {
 			h.Set("Cache-Control", "no-store")
+		} else {
+			// Static files have no date (embedded): revalidate so a deploy reaches open dashboards.
+			h.Set("Cache-Control", "no-cache")
 		}
 		next.ServeHTTP(w, r)
 	})
